@@ -72,14 +72,15 @@ func applyOrder(ctx context.Context, tx *sql.Tx, o WorkOrder) error {
 		    worker_rationale, trust_level, audit_only, workspace_root, workspace_git_head,
 		    workspace_baseline, context_pack_path, context_pack_checksum, context_pack_revision,
 		    operational_contract, acceptance_criteria, constraints_json, required_artifacts,
-		    created_at, updated_at, revision)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    created_at, updated_at, revision, model, model_cost_tier, model_rationale)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (id) DO NOTHING`,
 		o.ID, o.ThreadID, o.Title, o.Goal, o.Why, o.State, nullable(o.WorkerID),
 		o.WorkerRationale, o.TrustLevel, audit, o.WorkspaceRoot, o.WorkspaceGitHead,
 		o.WorkspaceBaseline, o.ContextPackPath, o.ContextPackChecksum, o.ContextPackRevision,
 		string(contract), string(criteria), string(constraints), string(artifacts),
-		ts(o.CreatedAt), ts(o.UpdatedAt), o.Revision)
+		ts(o.CreatedAt), ts(o.UpdatedAt), o.Revision,
+		o.Model, o.ModelCostTier, o.ModelRationale)
 	if err != nil {
 		return fmt.Errorf("проекция поручения %s: %w", o.ID, err)
 	}
@@ -330,7 +331,8 @@ const selectOrderColumns = `
 	       trust_level, audit_only, workspace_root, workspace_git_head, workspace_baseline,
 	       context_pack_path, context_pack_checksum, context_pack_revision, operational_contract,
 	       acceptance_criteria, constraints_json, required_artifacts, created_at, updated_at,
-	       approved_at, started_at, finished_at, outcome, failure_reason, revision
+	       approved_at, started_at, finished_at, outcome, failure_reason, revision,
+	       model, model_cost_tier, model_rationale
 	FROM work_orders`
 
 type scanner interface{ Scan(dest ...any) error }
@@ -347,7 +349,8 @@ func scanOrder(row scanner) (WorkOrder, error) {
 		&o.WorkerRationale, &o.TrustLevel, &audit, &o.WorkspaceRoot, &o.WorkspaceGitHead,
 		&o.WorkspaceBaseline, &o.ContextPackPath, &o.ContextPackChecksum, &o.ContextPackRevision,
 		&contract, &criteria, &constraints, &artifacts, &createdAt, &updatedAt,
-		&approvedAt, &startedAt, &finishedAt, &o.Outcome, &o.FailureReason, &o.Revision)
+		&approvedAt, &startedAt, &finishedAt, &o.Outcome, &o.FailureReason, &o.Revision,
+		&o.Model, &o.ModelCostTier, &o.ModelRationale)
 	if err != nil {
 		return WorkOrder{}, err
 	}

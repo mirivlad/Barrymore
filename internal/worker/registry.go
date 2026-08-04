@@ -698,7 +698,7 @@ func (r *Registry) RefreshModels(ctx context.Context, workerID string, actor eve
 func (r *Registry) Models(ctx context.Context, workerID string) ([]Model, error) {
 	rows, err := r.db.Reader().QueryContext(ctx, `
 		SELECT id, worker_id, model_ref, provider, name, cost_tier, source, evidence,
-		       is_default, observed_at
+		       is_default, observed_at, confidence, last_cost, verified_at
 		  FROM worker_models WHERE worker_id = ?
 		 ORDER BY CASE cost_tier WHEN 'free' THEN 0 WHEN 'subscription' THEN 1
 		                         WHEN 'unknown' THEN 2 ELSE 3 END, model_ref`, workerID)
@@ -713,14 +713,23 @@ func (r *Registry) Models(ctx context.Context, workerID string) ([]Model, error)
 			m          Model
 			isDefault  int
 			observedAt string
+			verifiedAt sql.NullString
 		)
 		if err := rows.Scan(&m.ID, &m.WorkerID, &m.Ref, &m.Provider, &m.Name,
-			&m.CostTier, &m.Source, &m.Evidence, &isDefault, &observedAt); err != nil {
+			&m.CostTier, &m.Source, &m.Evidence, &isDefault, &observedAt,
+			&m.Confidence, &m.LastCost, &verifiedAt); err != nil {
 			return nil, err
 		}
 		m.IsDefault = isDefault == 1
 		if m.ObservedAt, err = parseTS(observedAt); err != nil {
 			return nil, err
+		}
+		if verifiedAt.Valid && verifiedAt.String != "" {
+			t, err := parseTS(verifiedAt.String)
+			if err != nil {
+				return nil, err
+			}
+			m.VerifiedAt = &t
 		}
 		out = append(out, m)
 	}
