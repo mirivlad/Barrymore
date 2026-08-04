@@ -209,17 +209,40 @@ func (a *Adapter) Plan(ctx context.Context, inst worker.Installation, req worker
 	// Промпт читается из stdin: "-" явно указывает источник.
 	argv = append(argv, "-")
 
+	// Внутри изоляции codex получает собственный писчий CODEX_HOME на tmpfs,
+	// а настоящий auth.json подмонтирован в него только для чтения. Значение
+	// секрета не копируется и Бэрримором не читается (06_SECURITY §6).
+	sandboxHome := "/run/barrymore/codex-home"
+	sb := worker.Sandbox{
+		TmpfsDirs:     []string{sandboxHome},
+		ReadOnlyBinds: map[string]string{},
+		WritableBinds: map[string]string{},
+		Network:       true,
+	}
+	if hostAuth := filepath.Join(a.codexHome(), "auth.json"); fileExists(hostAuth) {
+		sb.ReadOnlyBinds[hostAuth] = filepath.Join(sandboxHome, "auth.json")
+	}
+	if req.OutputDir != "" {
+		sb.WritableBinds[req.OutputDir] = req.OutputDir
+	}
+
 	return worker.RunPlan{
 		Argv: argv,
 		Env: []string{
-			"CODEX_HOME=" + a.codexHome(),
+			"CODEX_HOME=" + sandboxHome,
 			"TERM=dumb",
 			"NO_COLOR=1",
 		},
 		Stdin:             req.Prompt,
 		StructuredOutput:  true,
 		ExpectedArtifacts: artifacts,
+		Sandbox:           sb,
 	}, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func (a *Adapter) codexHome() string {

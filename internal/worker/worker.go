@@ -175,6 +175,23 @@ type RunRequest struct {
 	Timeout          time.Duration
 }
 
+// Sandbox описывает, что исполнителю нужно внутри изоляции.
+//
+// ADR 0007: рабочий каталог остаётся доступным только для чтения. Adapter
+// перечисляет ровно то, без чего процесс не запустится, а не «дайте всё».
+type Sandbox struct {
+	// TmpfsDirs — каталоги, которые должны быть записываемыми и эфемерными.
+	// Через них исполнителю дают писать, не открывая доступ к настоящим файлам.
+	TmpfsDirs []string
+	// ReadOnlyBinds — путь на хосте → путь внутри изоляции.
+	// Так учётные данные становятся видны процессу, не будучи скопированными.
+	ReadOnlyBinds map[string]string
+	// WritableBinds — настоящие каталоги, доступные на запись (артефакты).
+	WritableBinds map[string]string
+	// Network требуется, если исполнитель обращается к своему провайдеру.
+	Network bool
+}
+
 // RunPlan — как именно запускать процесс.
 type RunPlan struct {
 	Argv []string
@@ -187,6 +204,8 @@ type RunPlan struct {
 	StructuredOutput bool
 	// ExpectedArtifacts — файлы, которые обязаны появиться в OutputDir.
 	ExpectedArtifacts []string
+	// Sandbox — требования к изоляции.
+	Sandbox Sandbox
 }
 
 // Adapter описывает, как обращаться с конкретным исполнителем.
