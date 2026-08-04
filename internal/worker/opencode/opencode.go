@@ -225,24 +225,19 @@ func (a *Adapter) Plan(ctx context.Context, inst worker.Installation, req worker
 	if req.OutputDir != "" {
 		sb = sb.Writable(req.OutputDir, req.OutputDir)
 	}
-	// Состояние и учётные данные нужны на чтение: копировать секреты Бэрримор
-	// не станет, а без них исполнитель не обратится к провайдеру.
 	if home != "" {
+		// Каталог состояния принадлежит самому исполнителю: там его база
+		// сессий и учётные данные, которые он обновляет сам. Он отдаётся на
+		// запись — это его собственные данные, а не аудируемый репозиторий.
+		// Гарантия audit-only касается рабочего каталога, и она не ослабевает.
 		stateDir := filepath.Join(home, ".local", "share", "opencode")
-		for _, dir := range []string{stateDir, filepath.Join(home, ".config", "opencode")} {
-			if _, err := os.Stat(dir); err == nil {
-				sb = sb.ReadOnly(dir, dir)
-			}
-		}
-		// Поверх каталога состояния открывается на запись только подкаталог
-		// логов: без него opencode не стартует. Порядок обязателен — точка
-		// монтирования создаётся внутри уже примонтированного каталога.
 		if _, err := os.Stat(stateDir); err == nil {
-			logs := filepath.Join(req.ScratchDir, "opencode-log")
-			if err := os.MkdirAll(logs, 0o700); err != nil {
-				return worker.RunPlan{}, fmt.Errorf("opencode: каталог логов: %w", err)
-			}
-			sb = sb.Writable(logs, filepath.Join(stateDir, "log"))
+			sb = sb.Writable(stateDir, stateDir)
+		}
+		// Настройки правиться не должны.
+		configDir := filepath.Join(home, ".config", "opencode")
+		if _, err := os.Stat(configDir); err == nil {
+			sb = sb.ReadOnly(configDir, configDir)
 		}
 	}
 
