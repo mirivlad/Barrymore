@@ -1,0 +1,28 @@
+# Local data root (models, databases, artifacts, runs) — never versioned
+/data/
+
+# Build output
+/bin/
+/dist/
+/web/build/
+/web/.svelte-kit/
+node_modules/
+
+# Third-party sources built locally (spikes)
+/third_party/
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local overrides
+*.local.toml
+.env
+.env.*
