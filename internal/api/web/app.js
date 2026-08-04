@@ -100,7 +100,9 @@ async function loadState() {
             : `<span class="tag bad">не заданы</span> поручения будут отклоняться`
         }</td></tr>
         <tr><th>Политика стоимости</th><td>${esc(s.model_policy || "—")}</td></tr>
-        <tr><th>Разговорный слой</th><td>${esc(s.conversation_status)}</td></tr>
+        <tr><th>Разговорный слой</th><td>${
+          tag(s.conversation?.status || "неизвестно", PROVIDER_TONE[s.conversation?.status] || "")
+        } ${esc(s.conversation?.reason || "")}</td></tr>
         <tr><th>Событий в журнале</th><td>${esc(s.journal_head)}</td></tr>
         <tr><th>Активных запусков</th><td>${(s.active_runs || []).length}</td></tr>
         <tr><th>Виды ожиданий</th><td class="muted">${(s.expectation_kinds || []).map(esc).join(", ")}</td></tr>
@@ -653,6 +655,279 @@ window.showReport = async (id) => {
   }
 };
 
+
+// ---------- приёмная ----------
+
+let currentConversation = null;
+let sending = false;
+
+// Локальная модель отвечает десятками секунд: интерфейс обязан честно
+// показывать ожидание, а не притворяться, что ничего не происходит.
+const PROVIDER_TONE = { ready: "ok", unreachable: "bad", not_configured: "warn", broken: "bad" };
+
+async function loadTalk() {
+  try {
+    const d = await api("/api/v1/conversations");
+    const p = d.provider || {};
+    const ready = p.status === "ready";
+    $("talk-provider").innerHTML = `
+      <div class="row">
+        <strong>Разговорный слой</strong>
+        ${tag(p.status || "неизвестно", PROVIDER_TONE[p.status] || "")}
+        <span class="grow"></span>
+        <span class="muted">${esc(p.model || "")}${
+          p.latency ? ` · отклик ${Math.round(p.latency / 1e6)} мс` : ""
+        }</span>
+      </div>
+      <div class="muted" style="margin-top:6px">${esc(p.reason || "")}</div>
+      ${
+        ready
+          ? ""
+          : `<div class="notes" style="margin-top:10px">Бэрримор сейчас не разговаривает.
+             Нити, штат, поручения и предиктивный контур работают без него.</div>`
+      }`;
+    $("talk-send").disabled = !ready;
+
+    const items = d.items || [];
+    if (!currentConversation && items.length) currentConversation = items[0].id;
+    if (currentConversation) await loadChat();
+    else $("chat").innerHTML = `<div class="muted">Начните новый разговор.</div>`;
+  } catch (err) {
+    $("talk-provider").innerHTML = `<span class="tag bad">ошибка</span> ${esc(err.message)}`;
+  }
+
+  try {
+    const t = await api("/api/v1/threads");
+    const select = $("talk-thread");
+    select.innerHTML = `<option value="">без нити</option>` +
+      (t.items || []).map((x) => `<option value="${esc(x.id)}">${esc(x.title)}</option>`).join("");
+  } catch { /* список нитей не критичен для разговора */ }
+}
+
+function bubble(m) {
+  const who = m.role === "person" ? "Вы" : "Бэрримор";
+  const meta = [];
+  if (m.model) meta.push(esc(m.model));
+  if (m.latency_ms) meta.push(`${Math.round(m.latency_ms / 1000)} с`);
+  if (m.output_tokens) meta.push(`${m.prompt_tokens}+${m.output_tokens} токенов`);
+  const trace = (m.retrieval_trace || []).length
+    ? `<div class="meta">подано в контекст: ${m.retrieval_trace.map(esc).join("; ")}</div>`
+    : "";
+  return `<div class="bubble ${esc(m.role)}">
+    <div class="meta">${who} · ${when(m.created_at)}${meta.length ? " · " + meta.join(" · ") : ""}</div>
+    ${esc(m.content)}
+    ${trace}
+  </div>`;
+}
+
+async function loadChat() {
+  if (!currentConversation) return;
+  try {
+    const d = await api(`/api/v1/conversations/${currentConversation}/messages`);
+    const items = d.items || [];
+    $("chat").innerHTML = items.length
+      ? items.map(bubble).join("")
+      : `<div class="muted">Разговор пуст. Напишите первым.</div>`;
+    $("chat").scrollTop = $("chat").scrollHeight;
+  } catch (err) {
+    $("chat").innerHTML = `<div class="muted">${esc(err.message)}</div>`;
+  }
+}
+
+$("talk-new").addEventListener("click", async () => {
+  try {
+    const c = await api("/api/v1/conversations", {
+      method: "POST",
+      body: JSON.stringify({ thread_id: $("talk-thread").value, title: "" }),
+    });
+    currentConversation = c.id;
+    $("talk-proposals").hidden = true;
+    await loadChat();
+  } catch (err) {
+    alert(`Разговор не начат: ${err.message}`);
+  }
+});
+
+async function send() {
+  if (sending) return;
+  const text = $("talk-input").value.trim();
+  if (!text) return;
+
+  if (!currentConversation) {
+    const c = await api("/api/v1/conversations", {
+      method: "POST",
+      body: JSON.stringify({ thread_id: $("talk-thread").value, title: "" }),
+    });
+    currentConversation = c.id;
+  }
+
+  sending = true;
+  $("talk-send").disabled = true;
+  $("talk-input").value = "";
+  $("chat").insertAdjacentHTML("beforeend",
+    `<div class="bubble person"><div class="meta">Вы · только что</div>${esc(text)}</div>
+     <div class="thinking" id="thinking">Бэрримор думает… на локальной модели это занимает до минуты.</div>`);
+  $("chat").scrollTop = $("chat").scrollHeight;
+
+  const started = Date.now();
+  const timer = setInterval(() => {
+    const el = document.getElementById("thinking");
+    if (el) el.textContent = `Бэрримор думает… ${Math.round((Date.now() - started) / 1000)} с`;
+  }, 1000);
+
+  try {
+    const turn = await api(`/api/v1/conversations/${currentConversation}/messages`, {
+      method: "POST", body: JSON.stringify({ text }),
+    });
+    clearInterval(timer);
+    await loadChat();
+    renderProposals(turn);
+    loadMemory();
+  } catch (err) {
+    clearInterval(timer);
+    const el = document.getElementById("thinking");
+    if (el) el.outerHTML = `<div class="bubble barrymore"><span class="tag bad">не отвечено</span>
+      <div style="margin-top:6px">${esc(err.message)}</div></div>`;
+  } finally {
+    sending = false;
+    $("talk-send").disabled = false;
+  }
+}
+
+// renderProposals показывает предложения отдельно от ответа: они ничего
+// не меняют до вашего решения.
+function renderProposals(turn) {
+  const p = turn.proposal || {};
+  const cands = turn.memory_candidates || [];
+  const orders = p.work_order_proposals || [];
+  const questions = p.open_questions || [];
+  const pos = p.thread_position;
+
+  if (!cands.length && !orders.length && !questions.length && !pos) {
+    $("talk-proposals").hidden = true;
+    return;
+  }
+  $("talk-proposals").hidden = false;
+  $("talk-proposals").innerHTML = `
+    <h2>Предложения Бэрримора</h2>
+    <p class="muted">Ничего из этого не применено. Решение за вами.</p>
+    ${
+      pos
+        ? `<div style="margin-top:8px"><strong style="font-size:13px">Его позиция по нити</strong>
+           <div>${esc(pos.statement)}</div>
+           <div class="muted">уверенность ${pos.confidence} · ${esc(pos.basis)}</div></div>`
+        : ""
+    }
+    ${
+      cands.length
+        ? `<div style="margin-top:10px"><strong style="font-size:13px">Запомнить</strong>
+           <ul class="plain">${cands.map((c) => `
+             <li><div>${tag(c.type)} ${esc(c.content)}</div>
+             <div class="row" style="margin-top:6px">
+               <button class="act" onclick="acceptMemory('${esc(c.id)}')">Запомнить</button>
+               <button class="ghost" onclick="rejectMemory('${esc(c.id)}')">Не надо</button>
+             </div></li>`).join("")}</ul></div>`
+        : ""
+    }
+    ${
+      orders.length
+        ? `<div style="margin-top:10px"><strong style="font-size:13px">Поручить исполнителю</strong>
+           <ul class="plain">${orders.map((o) => `
+             <li><div>${esc(o.goal)}</div><div class="muted">${esc(o.why)}</div></li>`).join("")}
+           </ul>
+           <div class="muted">Поручение создаётся на вкладке «Поручения»: там выбирается
+           исполнитель, модель и требуется ваше подтверждение.</div></div>`
+        : ""
+    }
+    ${
+      questions.length
+        ? `<div style="margin-top:10px"><strong style="font-size:13px">Открытые вопросы</strong>
+           <ul class="plain">${questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ul></div>`
+        : ""
+    }`;
+}
+
+$("talk-send").addEventListener("click", send);
+$("talk-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
+});
+
+// ---------- память ----------
+
+window.acceptMemory = async (id) => {
+  await api(`/api/v1/memory/candidates/${id}/accept`, { method: "POST", body: "{}" });
+  loadMemory();
+  $("talk-proposals").hidden = true;
+};
+
+window.rejectMemory = async (id) => {
+  await api(`/api/v1/memory/candidates/${id}/reject`, { method: "POST", body: "{}" });
+  loadMemory();
+  $("talk-proposals").hidden = true;
+};
+
+window.revokeMemory = async (id) => {
+  if (!confirm("Отозвать эту запись? Бэрримор перестанет её использовать.")) return;
+  await api(`/api/v1/memories/${id}`, { method: "DELETE" });
+  loadMemory();
+};
+
+async function loadMemory() {
+  try {
+    const d = await api("/api/v1/memory/candidates");
+    const items = d.items || [];
+    $("mem-candidates").innerHTML = items.length
+      ? items.map((c) => `
+          <li>
+            <div class="row">${tag(c.type)} <strong>${esc(c.content)}</strong></div>
+            <div class="muted" style="margin-top:4px">${esc(c.reason || "")}
+              · предложил ${esc(c.proposed_by)} · ${when(c.created_at)}</div>
+            <div class="row" style="margin-top:8px">
+              <button class="act" onclick="acceptMemory('${esc(c.id)}')">Запомнить</button>
+              <button class="ghost" onclick="rejectMemory('${esc(c.id)}')">Отклонить</button>
+            </div>
+          </li>`).join("")
+      : `<li class="muted">решений не требуется</li>`;
+  } catch (err) {
+    $("mem-candidates").innerHTML = `<li class="muted">${esc(err.message)}</li>`;
+  }
+
+  try {
+    const q = $("mem-search").value.trim();
+    const d = await api(`/api/v1/memories${q ? `?q=${encodeURIComponent(q)}` : ""}`);
+    const items = d.items || [];
+    $("mem-items").innerHTML = items.length
+      ? items.map((m) => `
+          <li${m.revoked_at ? ' style="opacity:.55"' : ""}>
+            <div class="row">
+              ${tag(m.type)}
+              ${m.revoked_at ? tag("отозвано", "bad") : ""}
+              <strong>${esc(m.content)}</strong>
+            </div>
+            <div class="muted" style="margin-top:4px">
+              откуда: ${esc(m.provenance?.source || "—")}, предложил
+              ${esc(m.provenance?.proposed_by || "—")}, принял
+              ${esc(m.provenance?.accepted_by || "—")} · ${when(m.created_at)}
+              ${m.revoke_reason ? `<br>причина отзыва: ${esc(m.revoke_reason)}` : ""}
+            </div>
+            ${
+              m.revoked_at
+                ? ""
+                : `<button class="ghost" style="margin-top:6px"
+                     onclick="revokeMemory('${esc(m.id)}')">Отозвать</button>`
+            }
+          </li>`).join("")
+      : `<li class="muted">память пуста</li>`;
+  } catch (err) {
+    $("mem-items").innerHTML = `<li class="muted">${esc(err.message)}</li>`;
+  }
+}
+
+$("mem-search").addEventListener("input", () => {
+  clearTimeout(window.__memTimer);
+  window.__memTimer = setTimeout(loadMemory, 300);
+});
+
 // ---------- журнал и живой поток ----------
 
 const journal = $("journal");
@@ -715,16 +990,20 @@ function handleEvent(msg) {
 // ---------- запуск ----------
 
 function refresh(tab) {
+  if (tab === "talk") loadTalk();
   if (tab === "state") loadState();
   if (tab === "threads") loadThreads();
   if (tab === "staff") loadWorkers();
   if (tab === "orders") { loadOrders(); loadThreads(); }
+  if (tab === "memory") loadMemory();
 }
 
-loadState();
-loadThreads();
+loadTalk();
 connectStream();
 setInterval(() => {
+  // Пока идёт ответ модели, перерисовывать разговор нельзя: это стёрло бы
+  // индикатор ожидания и введённый текст.
+  if (sending) return;
   const current = document.querySelector('nav button[aria-current="true"]');
-  if (current) refresh(current.dataset.tab);
+  if (current && current.dataset.tab !== "talk") refresh(current.dataset.tab);
 }, 10000);

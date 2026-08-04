@@ -74,6 +74,18 @@
   .notes { border-left: 3px solid var(--warn); padding-left: 12px; }
   .clickable { cursor: pointer; }
   .clickable:hover { color: var(--accent); }
+  .chat {
+    display: flex; flex-direction: column; gap: 10px; margin-top: 12px;
+    max-height: 52vh; overflow-y: auto; padding-right: 4px;
+  }
+  .bubble {
+    padding: 10px 13px; border-radius: 12px; border: 1px solid var(--line);
+    white-space: pre-wrap; line-height: 1.5; max-width: 88%;
+  }
+  .bubble.person { align-self: flex-end; background: var(--bg); }
+  .bubble.barrymore { align-self: flex-start; background: var(--panel); }
+  .bubble .meta { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+  .thinking { align-self: flex-start; color: var(--muted); font-style: italic; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   td, th { text-align: left; padding: 5px 8px 5px 0; vertical-align: top; }
   th { color: var(--muted); font-weight: 500; }
@@ -84,10 +96,12 @@
   <h1>Бэрримор</h1>
   <span class="muted">интерфейс оператора</span>
   <nav>
-    <button data-tab="state" aria-current="true">Состояние</button>
+    <button data-tab="talk" aria-current="true">Приёмная</button>
     <button data-tab="threads">Нити</button>
     <button data-tab="staff">Штат</button>
     <button data-tab="orders">Поручения</button>
+    <button data-tab="memory">Память</button>
+    <button data-tab="state">Состояние</button>
     <button data-tab="journal">Журнал</button>
   </nav>
   <span class="grow"></span>
@@ -95,7 +109,45 @@
 </header>
 
 <main>
-  <section id="tab-state">
+  <section id="tab-talk">
+    <div class="card" id="talk-provider"></div>
+    <div class="card">
+      <div class="row">
+        <h2 style="margin:0">Разговор</h2>
+        <span class="grow"></span>
+        <select id="talk-thread" style="max-width:260px"></select>
+        <button class="ghost" id="talk-new">Новый разговор</button>
+      </div>
+      <div id="chat" class="chat"></div>
+      <div class="row" style="margin-top:12px; align-items:flex-end">
+        <div class="grow">
+          <textarea id="talk-input" rows="2"
+            placeholder="Напишите Бэрримору… (Ctrl+Enter — отправить)"></textarea>
+        </div>
+        <button class="act" id="talk-send">Отправить</button>
+      </div>
+      <div class="muted" id="talk-status" style="margin-top:6px"></div>
+    </div>
+    <div class="card" id="talk-proposals" hidden></div>
+  </section>
+
+  <section id="tab-memory" hidden>
+    <div class="card">
+      <h2>Кандидаты в память</h2>
+      <p class="muted">Ничего не записывается без вашего решения.</p>
+      <ul class="plain" id="mem-candidates"><li class="muted">загрузка…</li></ul>
+    </div>
+    <div class="card">
+      <div class="row">
+        <h2 style="margin:0">Подтверждённая память</h2>
+        <span class="grow"></span>
+        <input id="mem-search" placeholder="поиск" style="max-width:220px">
+      </div>
+      <ul class="plain" id="mem-items"><li class="muted">загрузка…</li></ul>
+    </div>
+  </section>
+
+  <section id="tab-state" hidden>
     <div class="card">
       <h2>Что известно прямо сейчас</h2>
       <div id="state-body" class="muted">загрузка…</div>

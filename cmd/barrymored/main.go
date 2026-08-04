@@ -36,6 +36,10 @@ func run() error {
 		tick     = flag.Duration("tick", 5*time.Second, "интервал предиктивного контура")
 		costs    = flag.String("model-policy", "free",
 			"допустимая стоимость моделей: free, prefer-free, any")
+		provider = flag.String("provider", "",
+			"адрес OpenAI-совместимого провайдера разговорного слоя, например http://127.0.0.1:18080")
+		providerModel = flag.String("provider-model", "local", "имя модели у провайдера")
+		providerLabel = flag.String("provider-label", "локальная модель", "как называть провайдера")
 	)
 	flag.Parse()
 
@@ -57,7 +61,13 @@ func run() error {
 	}
 
 	a, err := app.New(ctx, app.Config{
-		ModelPolicy:    policy,
+		ModelPolicy:      policy,
+		ProviderEndpoint: *provider,
+		ProviderModel:    *providerModel,
+		ProviderLabel:    *providerLabel,
+		// Ключ приходит только из окружения: в командной строке он был бы
+		// виден в списке процессов.
+		ProviderAPIKey: os.Getenv("BARRYMORE_PROVIDER_API_KEY"),
 		DataRoot:       *dataRoot,
 		Addr:           *addr,
 		WorkspaceRoots: splitRoots(*roots),

@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/mirivlad/barrymore/internal/app"
+	"github.com/mirivlad/barrymore/internal/conversation"
 	"github.com/mirivlad/barrymore/internal/delegation"
 	"github.com/mirivlad/barrymore/internal/event"
+	"github.com/mirivlad/barrymore/internal/memory"
 	"github.com/mirivlad/barrymore/internal/runtime"
 	"github.com/mirivlad/barrymore/internal/thread"
 	"github.com/mirivlad/barrymore/internal/worker"
@@ -73,6 +75,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/discrepancies", s.listDiscrepancies)
 	mux.HandleFunc("POST /api/v1/discrepancies/{id}/acknowledge", s.ackDiscrepancy)
 	mux.HandleFunc("GET /api/v1/observations", s.listObservations)
+
+	mux.HandleFunc("GET /api/v1/conversations", s.listConversations)
+	mux.HandleFunc("POST /api/v1/conversations", s.createConversation)
+	mux.HandleFunc("GET /api/v1/conversations/{id}/messages", s.conversationMessages)
+	mux.HandleFunc("POST /api/v1/conversations/{id}/messages", s.sendMessage)
+
+	mux.HandleFunc("GET /api/v1/memory/candidates", s.memoryCandidates)
+	mux.HandleFunc("POST /api/v1/memory/candidates/{id}/accept", s.acceptCandidate)
+	mux.HandleFunc("POST /api/v1/memory/candidates/{id}/reject", s.rejectCandidate)
+	mux.HandleFunc("GET /api/v1/memories", s.listMemories)
+	mux.HandleFunc("DELETE /api/v1/memories/{id}", s.revokeMemory)
 
 	mux.Handle("/", s.ui())
 
@@ -135,18 +148,18 @@ func (s *Server) systemState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"journal_head":        head,
-		"open_discrepancies":  open,
-		"pending_approvals":   pending,
-		"active_runs":         active,
-		"isolation":           caps,
-		"workspace_roots":     s.app.Policy.Roots(),
-		"startup_notes":       s.app.StartupNotes,
-		"conversation_status": "не настроен: разговорный слой ещё не реализован",
-		"model_policy":        s.app.Config.ModelPolicy.Describe(),
-		"expectation_kinds":   s.app.Runtime.Kinds().Names(),
-		"reflex_policies":     s.app.Runtime.Reflexes().IDs(),
-		"observed_at":         s.app.Clock.Now(),
+		"journal_head":       head,
+		"open_discrepancies": open,
+		"pending_approvals":  pending,
+		"active_runs":        active,
+		"isolation":          caps,
+		"workspace_roots":    s.app.Policy.Roots(),
+		"startup_notes":      s.app.StartupNotes,
+		"conversation":       s.app.Talk.ProviderStatus(ctx),
+		"model_policy":       s.app.Config.ModelPolicy.Describe(),
+		"expectation_kinds":  s.app.Runtime.Kinds().Names(),
+		"reflex_policies":    s.app.Runtime.Reflexes().IDs(),
+		"observed_at":        s.app.Clock.Now(),
 	})
 }
 
@@ -673,6 +686,137 @@ func (s *Server) listObservations(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+// ---------- разговор ----------
+
+func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
+	items, err := s.app.Talk.List(r.Context(), 50)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "разговоры недоступны", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":    items,
+		"provider": s.app.Talk.ProviderStatus(r.Context()),
+	})
+}
+
+func (s *Server) createConversation(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ThreadID string `json:"thread_id"`
+		Title    string `json:"title"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	c, err := s.app.Talk.Start(r.Context(), body.ThreadID, body.Title)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, c)
+}
+
+func (s *Server) conversationMessages(w http.ResponseWriter, r *http.Request) {
+	items, err := s.app.Talk.Messages(r.Context(), r.PathValue("id"), 200)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// sendMessage передаёт реплику владельца и возвращает ответ Бэрримора.
+//
+// Ответ на локальной модели занимает десятки секунд, поэтому запрос долгий
+// по своей природе; клиент должен это учитывать.
+func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Text string `json:"text"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	turn, err := s.app.Talk.Send(r.Context(), r.PathValue("id"), body.Text)
+	if err != nil {
+		if errors.Is(err, conversation.ErrNoProvider) {
+			writeProblem(w, http.StatusServiceUnavailable, "Бэрримор не разговаривает",
+				err.Error())
+			return
+		}
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, turn)
+}
+
+// ---------- память ----------
+
+func (s *Server) memoryCandidates(w http.ResponseWriter, r *http.Request) {
+	pendingOnly := r.URL.Query().Get("all") != "true"
+	items, err := s.app.Memory.Candidates(r.Context(), pendingOnly, 100)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "кандидаты недоступны", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) acceptCandidate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Note string `json:"note"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	item, err := s.app.Memory.Accept(r.Context(), r.PathValue("id"), "owner", body.Note)
+	if err != nil {
+		writeProblem(w, http.StatusConflict, "кандидат не принят", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+func (s *Server) rejectCandidate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Note string `json:"note"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := s.app.Memory.Reject(r.Context(), r.PathValue("id"), "owner", body.Note); err != nil {
+		writeProblem(w, http.StatusConflict, "кандидат не отклонён", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "rejected"})
+}
+
+func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if q := r.URL.Query().Get("q"); q != "" {
+		items, err := s.app.Memory.Search(ctx, q, 50)
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "поиск не выполнен", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
+	items, err := s.app.Memory.All(ctx, 200)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "память недоступна", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) revokeMemory(w http.ResponseWriter, r *http.Request) {
+	reason := r.URL.Query().Get("reason")
+	if reason == "" {
+		reason = "отозвано владельцем"
+	}
+	if err := s.app.Memory.Revoke(r.Context(), r.PathValue("id"), reason); err != nil {
+		writeProblem(w, http.StatusBadRequest, "запись не отозвана", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "revoked"})
+}
+
 // ---------- вспомогательное ----------
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -706,7 +850,8 @@ func writeProblem(w http.ResponseWriter, status int, title, detail string) {
 func writeDomainError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, thread.ErrNotFound), errors.Is(err, delegation.ErrNotFound),
-		errors.Is(err, worker.ErrNotFound):
+		errors.Is(err, worker.ErrNotFound), errors.Is(err, conversation.ErrNotFound),
+		errors.Is(err, memory.ErrNotFound):
 		writeProblem(w, http.StatusNotFound, "не найдено", err.Error())
 	case errors.Is(err, event.ErrConcurrency):
 		writeProblem(w, http.StatusConflict, "запись устарела", err.Error())

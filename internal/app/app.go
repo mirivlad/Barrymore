@@ -13,8 +13,11 @@ import (
 	"time"
 
 	"github.com/mirivlad/barrymore/internal/clock"
+	"github.com/mirivlad/barrymore/internal/conversation"
 	"github.com/mirivlad/barrymore/internal/delegation"
 	"github.com/mirivlad/barrymore/internal/event"
+	"github.com/mirivlad/barrymore/internal/memory"
+	"github.com/mirivlad/barrymore/internal/model"
 	"github.com/mirivlad/barrymore/internal/projection"
 	"github.com/mirivlad/barrymore/internal/runtime"
 	"github.com/mirivlad/barrymore/internal/store"
@@ -38,6 +41,13 @@ type Config struct {
 	Clock          clock.Clock
 	// ModelPolicy задаёт допустимую стоимость моделей.
 	ModelPolicy worker.ModelPolicy
+	// ProviderEndpoint — адрес OpenAI-совместимого провайдера разговорного слоя.
+	// Пустая строка означает честное отключённое состояние.
+	ProviderEndpoint string
+	ProviderModel    string
+	ProviderLabel    string
+	// ProviderAPIKey читается из окружения и нигде не журналируется.
+	ProviderAPIKey string
 }
 
 // App — собранный экземпляр Бэрримора.
@@ -49,6 +59,8 @@ type App struct {
 	Threads    *thread.Service
 	Registry   *worker.Registry
 	Delegation *delegation.Service
+	Memory     *memory.Service
+	Talk       *conversation.Service
 	Policy     *Policy
 	Projector  *projection.Registry
 	Log        *slog.Logger
@@ -134,11 +146,25 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 
+	a.Memory = memory.NewService(db, a.Journal, cfg.Clock)
+
+	var provider model.Provider
+	if cfg.ProviderEndpoint != "" {
+		provider = model.NewOpenAICompatible(
+			cfg.ProviderEndpoint, cfg.ProviderModel, cfg.ProviderAPIKey, cfg.ProviderLabel)
+	}
+	a.Talk = conversation.New(conversation.Config{
+		DB: db, Journal: a.Journal, Clock: cfg.Clock, Provider: provider,
+		Threads: a.Threads, Memory: a.Memory, Runtime: a.Runtime, Logger: cfg.Logger,
+	})
+
 	a.Projector = projection.NewRegistry()
 	a.Runtime.Projections(a.Projector)
 	a.Threads.Projections(a.Projector)
 	a.Registry.Projections(a.Projector)
 	a.Delegation.Projections(a.Projector)
+	a.Memory.Projections(a.Projector)
+	a.Talk.Projections(a.Projector)
 
 	a.collectStartupNotes()
 	return a, nil
@@ -186,9 +212,11 @@ func (a *App) collectStartupNotes() {
 	}
 	a.StartupNotes = append(a.StartupNotes,
 		"политика стоимости: "+a.Config.ModelPolicy.Describe())
-	a.StartupNotes = append(a.StartupNotes,
-		"разговорный слой не настроен: Бэрримор пока не разговаривает, "+
-			"работают нити, штат, поручения и предиктивный контур")
+	if !a.Talk.Available() {
+		a.StartupNotes = append(a.StartupNotes,
+			"разговорный слой не настроен: Бэрримор не разговаривает, "+
+				"но нити, штат, поручения и предиктивный контур работают")
+	}
 }
 
 // Start выполняет восстановление и запускает планировщик.
