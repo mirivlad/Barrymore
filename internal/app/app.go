@@ -48,6 +48,8 @@ type Config struct {
 	ProviderLabel    string
 	// ProviderAPIKey читается из окружения и нигде не журналируется.
 	ProviderAPIKey string
+	// MemoryPolicy задаёт, что Бэрримор записывает сам.
+	MemoryPolicy memory.Policy
 }
 
 // App — собранный экземпляр Бэрримора.
@@ -146,7 +148,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 
-	a.Memory = memory.NewService(db, a.Journal, cfg.Clock)
+	a.Memory = memory.NewService(db, a.Journal, cfg.Clock, cfg.MemoryPolicy)
 
 	var provider model.Provider
 	if cfg.ProviderEndpoint != "" {
@@ -212,6 +214,8 @@ func (a *App) collectStartupNotes() {
 	}
 	a.StartupNotes = append(a.StartupNotes,
 		"политика стоимости: "+a.Config.ModelPolicy.Describe())
+	a.StartupNotes = append(a.StartupNotes,
+		"память: "+a.Memory.Policy().Describe())
 	if !a.Talk.Available() {
 		a.StartupNotes = append(a.StartupNotes,
 			"разговорный слой не настроен: Бэрримор не разговаривает, "+

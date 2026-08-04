@@ -100,6 +100,7 @@ async function loadState() {
             : `<span class="tag bad">не заданы</span> поручения будут отклоняться`
         }</td></tr>
         <tr><th>Политика стоимости</th><td>${esc(s.model_policy || "—")}</td></tr>
+        <tr><th>Память</th><td>${esc(s.memory_policy || "—")}</td></tr>
         <tr><th>Разговорный слой</th><td>${
           tag(s.conversation?.status || "неизвестно", PROVIDER_TONE[s.conversation?.status] || "")
         } ${esc(s.conversation?.reason || "")}</td></tr>
@@ -810,7 +811,8 @@ function renderProposals(turn) {
   $("talk-proposals").hidden = false;
   $("talk-proposals").innerHTML = `
     <h2>Предложения Бэрримора</h2>
-    <p class="muted">Ничего из этого не применено. Решение за вами.</p>
+    <p class="muted">Поручения и позиции не применены. Записи с пометкой
+      «записано» Бэрримор сделал сам — их можно сразу удалить.</p>
     ${
       pos
         ? `<div style="margin-top:8px"><strong style="font-size:13px">Его позиция по нити</strong>
@@ -820,12 +822,17 @@ function renderProposals(turn) {
     }
     ${
       cands.length
-        ? `<div style="margin-top:10px"><strong style="font-size:13px">Запомнить</strong>
+        ? `<div style="margin-top:10px"><strong style="font-size:13px">Память</strong>
            <ul class="plain">${cands.map((c) => `
-             <li><div>${tag(c.type)} ${esc(c.content)}</div>
+             <li><div>${tag(c.type)} ${c.auto ? tag("записано", "ok") : ""} ${esc(c.content)}</div>
+             <div class="muted" style="margin-top:4px">${esc(c.reason || "")}</div>
              <div class="row" style="margin-top:6px">
-               <button class="act" onclick="acceptMemory('${esc(c.id)}')">Запомнить</button>
-               <button class="ghost" onclick="rejectMemory('${esc(c.id)}')">Не надо</button>
+               ${
+                 c.auto
+                   ? `<button class="ghost" onclick="forgetMemory('${esc(c.item_id)}')">Удалить из памяти</button>`
+                   : `<button class="act" onclick="acceptMemory('${esc(c.id)}')">Запомнить</button>
+                      <button class="ghost" onclick="rejectMemory('${esc(c.id)}')">Не надо</button>`
+               }
              </div></li>`).join("")}</ul></div>`
         : ""
     }
@@ -866,22 +873,47 @@ window.rejectMemory = async (id) => {
   $("talk-proposals").hidden = true;
 };
 
-window.revokeMemory = async (id) => {
-  if (!confirm("Отозвать эту запись? Бэрримор перестанет её использовать.")) return;
+window.forgetMemory = async (id) => {
+  if (!confirm("Удалить эту запись? Бэрримор перестанет её знать и использовать.")) return;
   await api(`/api/v1/memories/${id}`, { method: "DELETE" });
   loadMemory();
 };
 
+$("mem-add").addEventListener("click", async () => {
+  const content = $("mem-new").value.trim();
+  if (!content) return;
+  try {
+    await api("/api/v1/memories", {
+      method: "POST",
+      body: JSON.stringify({ content, type: $("mem-type").value, thread_id: "" }),
+    });
+    $("mem-new").value = "";
+    loadMemory();
+  } catch (err) {
+    alert(`Не записано: ${err.message}`);
+  }
+});
+
+$("mem-new").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("mem-add").click();
+});
+
 async function loadMemory() {
+  try {
+    const st = await api("/api/v1/system/state");
+    $("mem-policy").textContent = `Режим: ${st.memory_policy || "—"}.`;
+  } catch { /* режим не критичен для работы раздела */ }
+
   try {
     const d = await api("/api/v1/memory/candidates");
     const items = d.items || [];
     $("mem-candidates").innerHTML = items.length
       ? items.map((c) => `
           <li>
-            <div class="row">${tag(c.type)} <strong>${esc(c.content)}</strong></div>
+            <div class="row">${tag(c.type)} ${tag(c.sensitivity)} <strong>${esc(c.content)}</strong></div>
             <div class="muted" style="margin-top:4px">${esc(c.reason || "")}
-              · предложил ${esc(c.proposed_by)} · ${when(c.created_at)}</div>
+              · уверенность ${c.confidence} · ${when(c.created_at)}</div>
+            <div class="muted">${esc(c.auto_decision || "")}</div>
             <div class="row" style="margin-top:8px">
               <button class="act" onclick="acceptMemory('${esc(c.id)}')">Запомнить</button>
               <button class="ghost" onclick="rejectMemory('${esc(c.id)}')">Отклонить</button>
@@ -901,20 +933,35 @@ async function loadMemory() {
           <li${m.revoked_at ? ' style="opacity:.55"' : ""}>
             <div class="row">
               ${tag(m.type)}
-              ${m.revoked_at ? tag("отозвано", "bad") : ""}
+              ${m.forgotten_at ? tag("удалено", "bad") : ""}
+              ${
+                !m.forgotten_at && m.provenance?.proposed_by === "barrymore"
+                  ? tag("записал сам", "")
+                  : ""
+              }
+              ${
+                !m.forgotten_at && m.provenance?.proposed_by === "person"
+                  ? tag("по вашей просьбе", "ok")
+                  : ""
+              }
               <strong>${esc(m.content)}</strong>
             </div>
             <div class="muted" style="margin-top:4px">
-              откуда: ${esc(m.provenance?.source || "—")}, предложил
-              ${esc(m.provenance?.proposed_by || "—")}, принял
-              ${esc(m.provenance?.accepted_by || "—")} · ${when(m.created_at)}
-              ${m.revoke_reason ? `<br>причина отзыва: ${esc(m.revoke_reason)}` : ""}
+              ${
+                m.forgotten_at
+                  ? `удалено ${when(m.forgotten_at)}; отметка о том, что запись была,
+                     остаётся в журнале`
+                  : `откуда: ${esc(m.provenance?.source || "—")}, предложил
+                     ${esc(m.provenance?.proposed_by || "—")}, принял
+                     ${esc(m.provenance?.accepted_by || "—")} · ${when(m.created_at)}
+                     ${m.provenance?.reason ? `<br>основание: ${esc(m.provenance.reason)}` : ""}`
+              }
             </div>
             ${
-              m.revoked_at
+              m.forgotten_at
                 ? ""
                 : `<button class="ghost" style="margin-top:6px"
-                     onclick="revokeMemory('${esc(m.id)}')">Отозвать</button>`
+                     onclick="forgetMemory('${esc(m.id)}')">Удалить</button>`
             }
           </li>`).join("")
       : `<li class="muted">память пуста</li>`;

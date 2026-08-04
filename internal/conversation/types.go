@@ -64,10 +64,15 @@ type PositionProposal struct {
 }
 
 // MemoryProposal — предложение запомнить.
+//
+// Чувствительность и уверенность определяет сам Бэрримор: от них зависит,
+// запишет ли он сведение сам или вынесет на решение владельца.
 type MemoryProposal struct {
-	Type    string `json:"type"`
-	Content string `json:"content"`
-	Reason  string `json:"reason"`
+	Type        string  `json:"type"`
+	Content     string  `json:"content"`
+	Reason      string  `json:"reason"`
+	Sensitivity string  `json:"sensitivity"`
+	Confidence  float64 `json:"confidence"`
 }
 
 // WorkOrderProposal — предложение поручить работу исполнителю.
@@ -93,6 +98,12 @@ type MemoryCandidateID struct {
 	ID      string `json:"id"`
 	Type    string `json:"type"`
 	Content string `json:"content"`
+	// Auto сообщает, записал ли Бэрримор это сам.
+	Auto bool `json:"auto"`
+	// Reason объясняет решение.
+	Reason string `json:"reason"`
+	// ItemID заполнен, если запись уже сделана.
+	ItemID string `json:"item_id,omitempty"`
 }
 
 // Типы событий разговора.

@@ -133,8 +133,23 @@
 
   <section id="tab-memory" hidden>
     <div class="card">
-      <h2>Кандидаты в память</h2>
-      <p class="muted">Ничего не записывается без вашего решения.</p>
+      <h2>Запомнить прямо сейчас</h2>
+      <p class="muted" id="mem-policy"></p>
+      <div class="row">
+        <div class="grow"><input id="mem-new" placeholder="Что Бэрримору стоит запомнить"></div>
+        <select id="mem-type" style="flex:0 0 160px">
+          <option value="fact">факт</option>
+          <option value="preference">предпочтение</option>
+          <option value="decision">решение</option>
+          <option value="procedure">процедура</option>
+        </select>
+        <button class="act" id="mem-add">Запомнить</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Ждут вашего решения</h2>
+      <p class="muted">Сюда попадает то, в чём Бэрримор не уверен или что счёл
+        чувствительным. Остальное он записывает сам — и это видно ниже.</p>
       <ul class="plain" id="mem-candidates"><li class="muted">загрузка…</li></ul>
     </div>
     <div class="card">

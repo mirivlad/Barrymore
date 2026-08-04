@@ -35,6 +35,14 @@ const (
 	TypeLesson       = "barrymore_lesson"
 )
 
+// Кто предложил запись.
+const (
+	// ProposedByOwner — владелец сказал это сам или прямо попросил запомнить.
+	ProposedByOwner = "person"
+	// ProposedByBarrymore — вывод Бэрримора из разговора.
+	ProposedByBarrymore = "barrymore"
+)
+
 // Статусы кандидата.
 const (
 	StatusPending  = "pending"
@@ -60,7 +68,10 @@ type Candidate struct {
 	DecidedAt      *time.Time `json:"decided_at,omitempty"`
 	DecidedBy      string     `json:"decided_by,omitempty"`
 	DecisionNote   string     `json:"decision_note,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	// AutoDecision объясняет, почему запись сделана автоматически либо
+	// почему её вынесли на решение владельца.
+	AutoDecision string    `json:"auto_decision,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 // Provenance — происхождение записи.
@@ -90,11 +101,16 @@ type Item struct {
 	SupersededBy string     `json:"superseded_by,omitempty"`
 	RevokedAt    *time.Time `json:"revoked_at,omitempty"`
 	RevokeReason string     `json:"revoke_reason,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
+	// ForgottenAt отмечает, что содержание удалено владельцем.
+	ForgottenAt *time.Time `json:"forgotten_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
 }
 
 // Active сообщает, действует ли запись.
-func (i Item) Active() bool { return i.RevokedAt == nil }
+func (i Item) Active() bool { return i.RevokedAt == nil && i.ForgottenAt == nil }
+
+// Forgotten сообщает, что содержание удалено владельцем.
+func (i Item) Forgotten() bool { return i.ForgottenAt != nil }
 
 // Типы событий памяти (08_API_AND_EVENTS §4).
 const (
@@ -103,6 +119,7 @@ const (
 	EvCandidateRejected = "memory.candidate.rejected"
 	EvCreated           = "memory.created"
 	EvRevoked           = "memory.revoked"
+	EvForgotten         = "memory.forgotten"
 )
 
 // StreamType — тип потока событий памяти.
@@ -116,12 +133,19 @@ type Service struct {
 	db      *store.DB
 	journal *event.Journal
 	clock   clock.Clock
+	policy  Policy
 }
 
 // NewService создаёт сервис памяти.
-func NewService(db *store.DB, j *event.Journal, clk clock.Clock) *Service {
-	return &Service{db: db, journal: j, clock: clk}
+func NewService(db *store.DB, j *event.Journal, clk clock.Clock, policy Policy) *Service {
+	if policy.Mode == "" {
+		policy = DefaultPolicy()
+	}
+	return &Service{db: db, journal: j, clock: clk, policy: policy}
 }
+
+// Policy возвращает действующий режим памяти.
+func (s *Service) Policy() Policy { return s.policy }
 
 // ProposeRequest — предложение запомнить.
 type ProposeRequest struct {
@@ -136,11 +160,74 @@ type ProposeRequest struct {
 	Confidence     float64
 }
 
-// Propose создаёт кандидата.
+// ProposeResult — что стало с предложением.
+type ProposeResult struct {
+	Candidate Candidate `json:"candidate"`
+	// Item заполнен, если Бэрримор записал сведение сам.
+	Item *Item `json:"item,omitempty"`
+	// Auto сообщает, была ли запись автоматической.
+	Auto bool `json:"auto"`
+	// Reason объясняет решение владельцу.
+	Reason string `json:"reason"`
+}
+
+// Propose создаёт кандидата и, если политика позволяет, сразу записывает его.
 //
-// Кандидат не влияет на извлечение контекста: до решения владельца этой
-// записи для Бэрримора не существует (сценарий B).
-func (s *Service) Propose(ctx context.Context, req ProposeRequest) (Candidate, error) {
+// Автоматическая запись не является скрытой: у неё есть видимое основание,
+// она показана в разделе памяти и в любой момент может быть удалена владельцем.
+func (s *Service) Propose(ctx context.Context, req ProposeRequest) (ProposeResult, error) {
+	c, err := s.propose(ctx, req)
+	if err != nil {
+		return ProposeResult{}, err
+	}
+	decision := s.policy.Decide(c)
+	if err := s.saveDecisionReason(ctx, c.ID, decision.Reason); err != nil {
+		return ProposeResult{}, err
+	}
+	c.AutoDecision = decision.Reason
+
+	if !decision.Auto {
+		return ProposeResult{Candidate: c, Reason: decision.Reason}, nil
+	}
+	item, err := s.Accept(ctx, c.ID, "barrymore", decision.Reason)
+	if err != nil {
+		return ProposeResult{}, err
+	}
+	c.Status = StatusAccepted
+	return ProposeResult{Candidate: c, Item: &item, Auto: true, Reason: decision.Reason}, nil
+}
+
+// Remember записывает то, что владелец прямо попросил запомнить.
+//
+// Просьба владельца и есть решение: отдельного подтверждения не требуется.
+func (s *Service) Remember(ctx context.Context, req ProposeRequest) (Item, error) {
+	req.ProposedBy = ProposedByOwner
+	if req.Confidence == 0 {
+		req.Confidence = 1
+	}
+	if req.Reason == "" {
+		req.Reason = "владелец попросил это запомнить"
+	}
+	c, err := s.propose(ctx, req)
+	if err != nil {
+		return Item{}, err
+	}
+	if err := s.saveDecisionReason(ctx, c.ID, "владелец попросил это запомнить"); err != nil {
+		return Item{}, err
+	}
+	return s.Accept(ctx, c.ID, "owner", "прямая просьба владельца")
+}
+
+func (s *Service) saveDecisionReason(ctx context.Context, candidateID, reason string) error {
+	_, err := s.db.Writer().ExecContext(ctx,
+		`UPDATE memory_candidates SET auto_decision = ? WHERE id = ?`, reason, candidateID)
+	if err != nil {
+		return fmt.Errorf("сохранение основания решения %s: %w", candidateID, err)
+	}
+	return nil
+}
+
+func (s *Service) propose(ctx context.Context, req ProposeRequest) (Candidate, error) {
 	if req.Content == "" {
 		return Candidate{}, fmt.Errorf("кандидат без содержания")
 	}
@@ -259,6 +346,25 @@ func (s *Service) Reject(ctx context.Context, candidateID, decidedBy, note strin
 	return err
 }
 
+// Forget удаляет содержание записи по требованию владельца.
+//
+// Событие из журнала физически не убирается: это нарушило бы его целостность
+// (06_SECURITY §11). Вместо этого содержание в памяти затирается, а запись
+// остаётся надгробием — видно, что нечто было и было удалено.
+func (s *Service) Forget(ctx context.Context, itemID, reason string) error {
+	_, err := s.journal.Write(ctx, func(tx *sql.Tx, w *event.TxWriter) error {
+		p := revokePayload{ID: itemID, At: s.clock.Now(), Reason: reason}
+		if _, err := w.Append(ctx, event.Request{
+			StreamType: StreamType, StreamID: itemID, ExpectedRevision: event.AnyRevision,
+			EventType: EvForgotten, Actor: event.Actor{Type: event.ActorPerson}, Payload: p,
+		}); err != nil {
+			return err
+		}
+		return applyForget(ctx, tx, p)
+	})
+	return err
+}
+
 // Revoke отзывает подтверждённую запись.
 //
 // Запись не удаляется физически: остаётся видимый след того, что она была
@@ -285,6 +391,7 @@ func (s *Service) Projections(reg *projection.Registry) {
 	reg.On(EvCandidateRejected, projectDecision)
 	reg.On(EvCreated, projectItem)
 	reg.On(EvRevoked, projectRevoke)
+	reg.On(EvForgotten, projectForget)
 }
 
 func marshalProvenance(p Provenance) string {

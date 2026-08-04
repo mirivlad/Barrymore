@@ -16,6 +16,7 @@ import (
 
 	"github.com/mirivlad/barrymore/internal/api"
 	"github.com/mirivlad/barrymore/internal/app"
+	"github.com/mirivlad/barrymore/internal/memory"
 	"github.com/mirivlad/barrymore/internal/worker"
 )
 
@@ -40,6 +41,8 @@ func run() error {
 			"адрес OpenAI-совместимого провайдера разговорного слоя, например http://127.0.0.1:18080")
 		providerModel = flag.String("provider-model", "local", "имя модели у провайдера")
 		providerLabel = flag.String("provider-label", "локальная модель", "как называть провайдера")
+		memoryMode    = flag.String("memory-policy", "auto-safe",
+			"что Бэрримор записывает сам: ask, auto-safe, auto")
 	)
 	flag.Parse()
 
@@ -60,8 +63,14 @@ func run() error {
 		return err
 	}
 
+	memPolicy, err := memory.ParsePolicy(*memoryMode)
+	if err != nil {
+		return err
+	}
+
 	a, err := app.New(ctx, app.Config{
 		ModelPolicy:      policy,
+		MemoryPolicy:     memPolicy,
 		ProviderEndpoint: *provider,
 		ProviderModel:    *providerModel,
 		ProviderLabel:    *providerLabel,

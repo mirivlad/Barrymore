@@ -85,7 +85,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/memory/candidates/{id}/accept", s.acceptCandidate)
 	mux.HandleFunc("POST /api/v1/memory/candidates/{id}/reject", s.rejectCandidate)
 	mux.HandleFunc("GET /api/v1/memories", s.listMemories)
-	mux.HandleFunc("DELETE /api/v1/memories/{id}", s.revokeMemory)
+	mux.HandleFunc("POST /api/v1/memories", s.rememberDirect)
+	mux.HandleFunc("DELETE /api/v1/memories/{id}", s.forgetMemory)
 
 	mux.Handle("/", s.ui())
 
@@ -805,16 +806,43 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (s *Server) revokeMemory(w http.ResponseWriter, r *http.Request) {
-	reason := r.URL.Query().Get("reason")
-	if reason == "" {
-		reason = "отозвано владельцем"
+// rememberDirect записывает то, что владелец прямо попросил запомнить.
+//
+// Просьба владельца и есть решение: подтверждать её ещё раз незачем.
+func (s *Server) rememberDirect(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Content  string `json:"content"`
+		Type     string `json:"type"`
+		ThreadID string `json:"thread_id"`
 	}
-	if err := s.app.Memory.Revoke(r.Context(), r.PathValue("id"), reason); err != nil {
-		writeProblem(w, http.StatusBadRequest, "запись не отозвана", err.Error())
+	if !decode(w, r, &body) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "revoked"})
+	item, err := s.app.Memory.Remember(r.Context(), memory.ProposeRequest{
+		Content: body.Content, Type: body.Type, ThreadID: body.ThreadID,
+	})
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "не записано", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, item)
+}
+
+// forgetMemory удаляет содержание записи по требованию владельца.
+func (s *Server) forgetMemory(w http.ResponseWriter, r *http.Request) {
+	reason := r.URL.Query().Get("reason")
+	if reason == "" {
+		reason = "удалено владельцем"
+	}
+	if err := s.app.Memory.Forget(r.Context(), r.PathValue("id"), reason); err != nil {
+		writeProblem(w, http.StatusBadRequest, "запись не удалена", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "forgotten",
+		"note": "содержание удалено из памяти; в журнале остаётся отметка о том, " +
+			"что запись была и была удалена",
+	})
 }
 
 // ---------- вспомогательное ----------

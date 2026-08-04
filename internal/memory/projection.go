@@ -99,6 +99,38 @@ func projectItem(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
 	return applyItem(ctx, tx, i)
 }
 
+// applyForget затирает содержание, оставляя надгробие.
+func applyForget(ctx context.Context, tx *sql.Tx, p revokePayload) error {
+	var rowID int64
+	err := tx.QueryRowContext(ctx, `SELECT rowid FROM memory_items WHERE id = ?`, p.ID).Scan(&rowID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("поиск записи памяти %s: %w", p.ID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE memory_items
+		   SET content = '[удалено владельцем]', provenance = '{}',
+		       forgotten_at = ?, revoked_at = COALESCE(revoked_at, ?), revoke_reason = ?
+		 WHERE id = ?`,
+		ts(p.At), ts(p.At), p.Reason, p.ID); err != nil {
+		return fmt.Errorf("проекция удаления записи %s: %w", p.ID, err)
+	}
+	if rowID != 0 {
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM memory_fts WHERE rowid = ?`, rowID); err != nil {
+			return fmt.Errorf("удаление записи из индекса %s: %w", p.ID, err)
+		}
+	}
+	return nil
+}
+
+func projectForget(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
+	var p revokePayload
+	if err := env.Decode(&p); err != nil {
+		return err
+	}
+	return applyForget(ctx, tx, p)
+}
+
 func applyRevoke(ctx context.Context, tx *sql.Tx, p revokePayload) error {
 	// Запись остаётся в базе с отметкой отзыва: след того, что она была,
 	// сохраняется, но из извлечения она исчезает.
@@ -134,7 +166,7 @@ func projectRevoke(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
 const selectCandidateColumns = `
 	SELECT id, type, content, reason, proposed_by, COALESCE(thread_id, ''),
 	       COALESCE(conversation_id, ''), COALESCE(message_id, ''), sensitivity, confidence,
-	       status, decided_at, decided_by, decision_note, created_at
+	       status, decided_at, decided_by, decision_note, auto_decision, created_at
 	FROM memory_candidates`
 
 type scanner interface{ Scan(dest ...any) error }
@@ -147,7 +179,7 @@ func scanCandidate(row scanner) (Candidate, error) {
 	)
 	err := row.Scan(&c.ID, &c.Type, &c.Content, &c.Reason, &c.ProposedBy, &c.ThreadID,
 		&c.ConversationID, &c.MessageID, &c.Sensitivity, &c.Confidence, &c.Status,
-		&decidedAt, &c.DecidedBy, &c.DecisionNote, &createdAt)
+		&decidedAt, &c.DecidedBy, &c.DecisionNote, &c.AutoDecision, &createdAt)
 	if err != nil {
 		return Candidate{}, err
 	}
@@ -204,19 +236,19 @@ func (s *Service) Candidates(ctx context.Context, pendingOnly bool, limit int) (
 const selectItemColumns = `
 	SELECT id, type, content, provenance, COALESCE(candidate_id, ''), COALESCE(thread_id, ''),
 	       sensitivity, confidence, valid_from, valid_until, COALESCE(superseded_by, ''),
-	       revoked_at, revoke_reason, created_at
+	       revoked_at, revoke_reason, forgotten_at, created_at
 	FROM memory_items`
 
 func scanItem(row scanner) (Item, error) {
 	var (
-		i                     Item
-		provenance            string
-		validFrom, createdAt  string
-		validUntil, revokedAt sql.NullString
+		i                                  Item
+		provenance                         string
+		validFrom, createdAt               string
+		validUntil, revokedAt, forgottenAt sql.NullString
 	)
 	err := row.Scan(&i.ID, &i.Type, &i.Content, &provenance, &i.CandidateID, &i.ThreadID,
 		&i.Sensitivity, &i.Confidence, &validFrom, &validUntil, &i.SupersededBy,
-		&revokedAt, &i.RevokeReason, &createdAt)
+		&revokedAt, &i.RevokeReason, &forgottenAt, &createdAt)
 	if err != nil {
 		return Item{}, err
 	}
@@ -231,6 +263,9 @@ func scanItem(row scanner) (Item, error) {
 		return Item{}, err
 	}
 	if i.RevokedAt, err = parseTSPtr(revokedAt); err != nil {
+		return Item{}, err
+	}
+	if i.ForgottenAt, err = parseTSPtr(forgottenAt); err != nil {
 		return Item{}, err
 	}
 	return i, nil
@@ -297,7 +332,7 @@ func (s *Service) Search(ctx context.Context, query string, limit int) ([]Item, 
 		SELECT m.id, m.type, m.content, m.provenance, COALESCE(m.candidate_id, ''),
 		       COALESCE(m.thread_id, ''), m.sensitivity, m.confidence, m.valid_from,
 		       m.valid_until, COALESCE(m.superseded_by, ''), m.revoked_at, m.revoke_reason,
-		       m.created_at
+		       m.forgotten_at, m.created_at
 		  FROM memory_fts f JOIN memory_items m ON m.rowid = f.rowid
 		 WHERE memory_fts MATCH ? AND m.revoked_at IS NULL
 		 ORDER BY rank LIMIT ?`, query, limit)

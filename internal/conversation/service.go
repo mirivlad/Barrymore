@@ -201,18 +201,24 @@ func (s *Service) Send(ctx context.Context, conversationID, text string) (Turn, 
 	// Предложения превращаются в видимых кандидатов. Ничего не записывается
 	// в память молча (00_PRODUCT_VISION §9.2).
 	for _, mc := range proposal.MemoryCandidates {
-		cand, err := s.memory.Propose(ctx, memory.ProposeRequest{
+		res, err := s.memory.Propose(ctx, memory.ProposeRequest{
 			Type: mc.Type, Content: mc.Content, Reason: mc.Reason,
-			ProposedBy: RoleBarrymore, ThreadID: conv.ThreadID,
+			Sensitivity: mc.Sensitivity, Confidence: mc.Confidence,
+			ProposedBy: memory.ProposedByBarrymore, ThreadID: conv.ThreadID,
 			ConversationID: conv.ID, MessageID: replyMsg.ID,
 		})
 		if err != nil {
 			s.log.Error("кандидат в память не создан", "conversation", conv.ID, "error", err)
 			continue
 		}
-		turn.MemoryCandidates = append(turn.MemoryCandidates, MemoryCandidateID{
-			ID: cand.ID, Type: cand.Type, Content: cand.Content,
-		})
+		entry := MemoryCandidateID{
+			ID: res.Candidate.ID, Type: res.Candidate.Type,
+			Content: res.Candidate.Content, Auto: res.Auto, Reason: res.Reason,
+		}
+		if res.Item != nil {
+			entry.ItemID = res.Item.ID
+		}
+		turn.MemoryCandidates = append(turn.MemoryCandidates, entry)
 	}
 
 	// Позиция Бэрримора по нити — тоже предложение, но она принадлежит нити
