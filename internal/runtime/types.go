@@ -44,7 +44,25 @@ const (
 	ObsWorkerVersion     = "worker.version"
 	ObsProbeResult       = "probe.result"
 	ObsStorage           = "storage.state"
+	// ObsLocalModel — состояние локального сервера модели.
+	ObsLocalModel = "local_model.state"
 )
+
+// LocalModelStatePayload — наблюдаемое состояние локального сервера модели.
+//
+// Живёт здесь, а не в пакете сервера, чтобы оценка ожидания оставалась чистой
+// функцией и не тянула за собой запуск процессов.
+type LocalModelStatePayload struct {
+	// Serving означает, что endpoint отвечает и модель готова принимать запросы.
+	Serving bool `json:"serving"`
+	// Loading означает, что процесс жив, но модель ещё грузится. Это не отказ:
+	// 35B через mmap поднимается минутами, и считать это расхождением нельзя.
+	Loading  bool   `json:"loading"`
+	Endpoint string `json:"endpoint,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	// Managed отличает процесс, поднятый Бэрримором, от чужого на том же адресе.
+	Managed bool `json:"managed"`
+}
 
 // Observation — типизированное наблюдение.
 //

@@ -16,6 +16,7 @@ import (
 	"github.com/mirivlad/barrymore/internal/conversation"
 	"github.com/mirivlad/barrymore/internal/delegation"
 	"github.com/mirivlad/barrymore/internal/event"
+	"github.com/mirivlad/barrymore/internal/localmodel"
 	"github.com/mirivlad/barrymore/internal/memory"
 	"github.com/mirivlad/barrymore/internal/model"
 	"github.com/mirivlad/barrymore/internal/projection"
@@ -50,6 +51,9 @@ type Config struct {
 	ProviderAPIKey string
 	// MemoryPolicy задаёт, что Бэрримор записывает сам.
 	MemoryPolicy memory.Policy
+	// LocalModel описывает сервер локальной модели, если Бэрримор ведёт его сам.
+	// Пустой ModelPath означает, что сервер поднимает владелец.
+	LocalModel localmodel.Spec
 }
 
 // App — собранный экземпляр Бэрримора.
@@ -63,6 +67,7 @@ type App struct {
 	Delegation *delegation.Service
 	Memory     *memory.Service
 	Talk       *conversation.Service
+	LocalModel *localmodel.Supervisor
 	Policy     *Policy
 	Projector  *projection.Registry
 	Log        *slog.Logger
@@ -150,14 +155,38 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 
 	a.Memory = memory.NewService(db, a.Journal, cfg.Clock, cfg.MemoryPolicy)
 
+	// Заданная локальная модель сама определяет адрес провайдера: указывать
+	// его отдельно значило бы допустить расхождение между тем, что Бэрримор
+	// поднимает, и тем, куда он обращается.
+	if cfg.ProviderEndpoint == "" && cfg.LocalModel.ModelPath != "" {
+		cfg.ProviderEndpoint = cfg.LocalModel.Endpoint()
+	}
+	a.Config = cfg
+
 	var provider model.Provider
 	if cfg.ProviderEndpoint != "" {
 		provider = model.NewOpenAICompatible(
 			cfg.ProviderEndpoint, cfg.ProviderModel, cfg.ProviderAPIKey, cfg.ProviderLabel)
 	}
+
+	a.LocalModel = localmodel.New(localmodel.Config{
+		Spec: cfg.LocalModel, Runtime: a.Runtime, Clock: cfg.Clock, Logger: cfg.Logger,
+		StateDir: filepath.Join(cfg.DataRoot, "model"),
+		Caps:     a.Delegation.Runner().Capabilities(),
+		Provider: provider,
+	})
+	if a.LocalModel.Enabled() {
+		if err := a.LocalModel.RegisterReflexes(); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	identity := conversation.DefaultIdentity()
+	identity.KeepsOwnModel = a.LocalModel.Enabled()
 	a.Talk = conversation.New(conversation.Config{
 		DB: db, Journal: a.Journal, Clock: cfg.Clock, Provider: provider,
 		Threads: a.Threads, Memory: a.Memory, Runtime: a.Runtime, Logger: cfg.Logger,
+		Identity: identity,
 	})
 
 	a.Projector = projection.NewRegistry()
@@ -221,6 +250,9 @@ func (a *App) collectStartupNotes() {
 			"разговорный слой не настроен: Бэрримор не разговаривает, "+
 				"но нити, штат, поручения и предиктивный контур работают")
 	}
+	if note := a.LocalModel.StartupNote(); note != "" {
+		a.StartupNotes = append(a.StartupNotes, note)
+	}
 }
 
 // Start выполняет восстановление и запускает планировщик.
@@ -241,9 +273,68 @@ func (a *App) Start(ctx context.Context) error {
 		}
 	}
 
+	if err := a.LocalModel.EnsureExpectation(ctx); err != nil {
+		return fmt.Errorf("ожидание по локальной модели: %w", err)
+	}
+
 	a.wg.Add(1)
 	go a.tickLoop(ctx)
+
+	if a.LocalModel.Configured() {
+		a.wg.Add(1)
+		go a.observeLocalModel(ctx)
+	}
+
+	if a.LocalModel.Enabled() {
+		// Загрузка больших весов занимает минуты, поэтому запуск сервера не
+		// задерживает готовность Бэрримора: интерфейс сразу честно показывает
+		// «модель поднимается», а не делает вид, что её нет.
+		a.wg.Add(1)
+		go a.ensureLocalModel(ctx)
+	}
 	return nil
+}
+
+// observeLocalModel регулярно записывает наблюдение о состоянии модели.
+//
+// Наблюдение отделено от действия: этот цикл ничего не запускает, он только
+// сообщает предиктивному контуру, что видит. Решение о перезапуске принимает
+// ожидание и его реакция с бюджетом попыток.
+func (a *App) observeLocalModel(ctx context.Context) {
+	defer a.wg.Done()
+	ticker := time.NewTicker(a.LocalModel.ObserveInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-a.stopped:
+			return
+		case <-ticker.C:
+			if _, err := a.LocalModel.Observe(ctx); err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				a.Log.Error("наблюдение за локальной моделью прервано", "error", err)
+			}
+		}
+	}
+}
+
+// ensureLocalModel поднимает локальную модель в фоне.
+func (a *App) ensureLocalModel(ctx context.Context) {
+	defer a.wg.Done()
+	st, err := a.LocalModel.Ensure(ctx)
+	switch {
+	case errors.Is(err, context.Canceled):
+		return
+	case err != nil:
+		a.Log.Warn("локальная модель не поднялась", "error", err,
+			"log", a.LocalModel.LogPath())
+	case st.Serving:
+		a.Log.Info("локальная модель отвечает", "endpoint", st.Endpoint,
+			"поднята_бэрримором", st.Managed)
+	}
 }
 
 // tickLoop крутит предиктивный контур.
@@ -355,6 +446,12 @@ func (p *Policy) Check(_ context.Context, req runtime.PolicyRequest) runtime.Pol
 	case "read", "process_probe":
 		// Чтение состояния и проверка живости обратимы и локальны.
 		return runtime.PolicyResult{Allowed: true, Rule: "reflex.read.allow"}
+	case localmodel.ActionClass:
+		// Поднятие сервера модели — не чтение, поэтому у него отдельный класс.
+		// Разрешено потому, что действие затрагивает только собственный
+		// инструмент Бэрримора, ничего не пишет в рабочие каталоги владельца
+		// и ограничено бюджетом попыток: три неудачи уводят вопрос к человеку.
+		return runtime.PolicyResult{Allowed: true, Rule: "reflex.local_model.allow"}
 	default:
 		return runtime.PolicyResult{
 			Allowed: false, Rule: "reflex.default.deny",

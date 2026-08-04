@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -374,5 +375,47 @@ func TestLivenessRejectsReusedPID(t *testing.T) {
 	l := r.Liveness(impostor)
 	if !l.Certain {
 		t.Fatal("вывод о переиспользованном номере должен быть уверенным")
+	}
+}
+
+// Между fork и регистрацией scope systemd отвечает «inactive» про живой
+// процесс. Принять этот ответ за смерть значит потерять только что запущенный
+// процесс — и тут же запустить второй такой же.
+func TestLivenessTrustsProcOverUnregisteredUnit(t *testing.T) {
+	r, _ := newRunner(t, &recordingSink{})
+	if r.Capabilities().SystemdRun == "" {
+		t.Skip("пользовательский systemd недоступен")
+	}
+
+	id := runner.ProcessIdentity{
+		UnitName: "barrymore-test-nonexistent.scope",
+		PID:      os.Getpid(),
+	}
+	if ticks, err := runner.StartTicks(id.PID); err == nil {
+		id.StartTicks = ticks
+	}
+
+	l := r.Liveness(id)
+	if !l.Alive {
+		t.Fatalf("живой процесс признан мёртвым из-за незарегистрированного unit: %+v", l)
+	}
+	if !strings.Contains(l.Detail, "inactive") {
+		t.Fatalf("расхождение источников скрыто от читателя: %q", l.Detail)
+	}
+}
+
+// А вот мёртвый процесс остаётся мёртвым: доверие к /proc не должно
+// превращаться в отказ замечать смерть.
+func TestLivenessReportsDeadProcessWithUnit(t *testing.T) {
+	r, _ := newRunner(t, &recordingSink{})
+	l := r.Liveness(runner.ProcessIdentity{
+		UnitName: "barrymore-test-nonexistent.scope",
+		PID:      4194303,
+	})
+	if l.Alive {
+		t.Fatalf("несуществующий процесс признан живым: %+v", l)
+	}
+	if !l.Certain {
+		t.Fatal("отсутствие процесса — уверенный вывод, а не предположение")
 	}
 }

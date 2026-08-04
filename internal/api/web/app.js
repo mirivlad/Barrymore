@@ -78,6 +78,45 @@ tabs.forEach((btn) => {
 
 // ---------- состояние ----------
 
+// localModelCell показывает три разных положения дел, не смешивая их:
+// модель отвечает, модель поднимается, модели нет. Загрузка весов идёт минутами,
+// и выдавать её за отказ значило бы врать.
+function localModelCell(m) {
+  if (!m || !m.configured) {
+    return `${tag("не ведётся", "")} <span class="muted">сервер модели поднимает владелец</span>`;
+  }
+  let state;
+  if (m.serving) state = tag("отвечает", "ok");
+  else if (m.loading) state = tag("поднимается", "warn");
+  else state = tag("не работает", "bad");
+
+  // Происхождение процесса отдельной строкой не выводится: причина уже
+  // говорит, поднял его Бэрримор или нет, и повтор только зашумлял бы.
+  const controls = m.serving
+    ? m.managed
+      ? `<button class="ghost" data-model-action="stop">остановить</button>`
+      : ""
+    : `<button class="ghost" data-model-action="start">поднять</button>`;
+
+  return `${state} <span class="muted">${esc(m.reason || "")}</span>
+    ${m.endpoint ? `<div class="muted">${esc(m.endpoint)}</div>` : ""}
+    ${controls ? `<div style="margin-top:6px">${controls}</div>` : ""}`;
+}
+
+// Управление моделью делегируется от таблицы: разметка состояния
+// перерисовывается целиком, и обработчики на кнопках не пережили бы обновления.
+$("state-body").addEventListener("click", async (e) => {
+  const action = e.target?.dataset?.modelAction;
+  if (!action) return;
+  e.target.disabled = true;
+  try {
+    await api(`/api/v1/local-model/${action}`, { method: "POST" });
+  } catch (err) {
+    alert(`Не вышло: ${err.message}`);
+  }
+  loadState();
+});
+
 async function loadState() {
   try {
     const s = await api("/api/v1/system/state");
@@ -104,6 +143,7 @@ async function loadState() {
         <tr><th>Разговорный слой</th><td>${
           tag(s.conversation?.status || "неизвестно", PROVIDER_TONE[s.conversation?.status] || "")
         } ${esc(s.conversation?.reason || "")}</td></tr>
+        <tr><th>Локальная модель</th><td>${localModelCell(s.local_model)}</td></tr>
         <tr><th>Событий в журнале</th><td>${esc(s.journal_head)}</td></tr>
         <tr><th>Активных запусков</th><td>${(s.active_runs || []).length}</td></tr>
         <tr><th>Виды ожиданий</th><td class="muted">${(s.expectation_kinds || []).map(esc).join(", ")}</td></tr>

@@ -16,6 +16,7 @@ import (
 
 	"github.com/mirivlad/barrymore/internal/api"
 	"github.com/mirivlad/barrymore/internal/app"
+	"github.com/mirivlad/barrymore/internal/localmodel"
 	"github.com/mirivlad/barrymore/internal/memory"
 	"github.com/mirivlad/barrymore/internal/worker"
 )
@@ -43,6 +44,18 @@ func run() error {
 		providerLabel = flag.String("provider-label", "локальная модель", "как называть провайдера")
 		memoryMode    = flag.String("memory-policy", "auto-safe",
 			"что Бэрримор записывает сам: ask, auto-safe, auto")
+
+		lmModel = flag.String("local-model", "",
+			"файл .gguf локальной модели; задан — Бэрримор сам поднимает и стережёт llama-server")
+		lmBinary = flag.String("llama-server", "",
+			"путь к llama-server; пусто — third_party/llama.cpp/build/bin, затем PATH")
+		lmPort    = flag.Int("local-model-port", 18080, "порт локального сервера модели")
+		lmContext = flag.Int("local-model-context", 32768, "размер контекста локальной модели")
+		lmThreads = flag.Int("local-model-threads", 0, "потоков CPU; 0 — умолчание llama-server")
+		lmGPU     = flag.Int("local-model-gpu-layers", 0, "слоёв на видеокарту (-ngl)")
+		lmCPUMoE  = flag.Int("local-model-cpu-moe", 0, "экспертов MoE оставить на CPU (-ncmoe)")
+		lmTimeout = flag.Duration("local-model-load-timeout", 10*time.Minute,
+			"сколько ждать готовности модели после запуска")
 	)
 	flag.Parse()
 
@@ -77,6 +90,19 @@ func run() error {
 		// Ключ приходит только из окружения: в командной строке он был бы
 		// виден в списке процессов.
 		ProviderAPIKey: os.Getenv("BARRYMORE_PROVIDER_API_KEY"),
+		LocalModel: localmodel.Spec{
+			Binary:      *lmBinary,
+			ModelPath:   *lmModel,
+			Port:        *lmPort,
+			ContextSize: *lmContext,
+			Threads:     *lmThreads,
+			GPULayers:   *lmGPU,
+			CPUMoE:      *lmCPUMoE,
+			// Шаблон чата модели нужен всегда: без него принуждение к схеме и
+			// отключение размышлений работают не так, как проверялось спайком.
+			Jinja:       true,
+			LoadTimeout: *lmTimeout,
+		},
 		DataRoot:       *dataRoot,
 		Addr:           *addr,
 		WorkspaceRoots: splitRoots(*roots),

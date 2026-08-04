@@ -5,6 +5,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,6 +89,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/memories", s.rememberDirect)
 	mux.HandleFunc("DELETE /api/v1/memories/{id}", s.forgetMemory)
 
+	mux.HandleFunc("GET /api/v1/local-model", s.localModelState)
+	mux.HandleFunc("POST /api/v1/local-model/start", s.startLocalModel)
+	mux.HandleFunc("POST /api/v1/local-model/stop", s.stopLocalModel)
+
 	mux.Handle("/", s.ui())
 
 	return withCommonHeaders(mux)
@@ -157,6 +162,7 @@ func (s *Server) systemState(w http.ResponseWriter, r *http.Request) {
 		"workspace_roots":    s.app.Policy.Roots(),
 		"startup_notes":      s.app.StartupNotes,
 		"conversation":       s.app.Talk.ProviderStatus(ctx),
+		"local_model":        s.app.LocalModel.State(),
 		"model_policy":       s.app.Config.ModelPolicy.Describe(),
 		"memory_policy":      s.app.Memory.Policy().Describe(),
 		"expectation_kinds":  s.app.Runtime.Kinds().Names(),
@@ -844,6 +850,48 @@ func (s *Server) forgetMemory(w http.ResponseWriter, r *http.Request) {
 		"note": "содержание удалено из памяти; в журнале остаётся отметка о том, " +
 			"что запись была и была удалена",
 	})
+}
+
+// ---------- локальная модель ----------
+
+func (s *Server) localModelState(w http.ResponseWriter, r *http.Request) {
+	st, err := s.app.LocalModel.Observe(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "состояние модели не записано", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// startLocalModel поднимает модель, не дожидаясь загрузки весов.
+//
+// Ответ приходит сразу: держать соединение открытым минуты означало бы
+// притворяться, будто ожидание мгновенно.
+func (s *Server) startLocalModel(w http.ResponseWriter, r *http.Request) {
+	if !s.app.LocalModel.Enabled() {
+		writeProblem(w, http.StatusConflict, "модель поднять нечем",
+			s.app.LocalModel.State().Reason)
+		return
+	}
+	go func() {
+		if _, err := s.app.LocalModel.Ensure(context.WithoutCancel(r.Context())); err != nil {
+			s.app.Log.Warn("локальная модель не поднялась по запросу владельца", "error", err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"status": "starting",
+		"note": "модель поднимается; загрузка весов занимает минуты, " +
+			"состояние видно в разделе «Состояние»",
+		"log_path": s.app.LocalModel.LogPath(),
+	})
+}
+
+func (s *Server) stopLocalModel(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.LocalModel.Stop(r.Context(), false); err != nil {
+		writeProblem(w, http.StatusConflict, "модель не остановлена", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "stopped"})
 }
 
 // ---------- вспомогательное ----------

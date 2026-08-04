@@ -8,7 +8,12 @@ DATA_ROOT ?= $(CURDIR)/data/runtime
 WORKSPACE_ROOTS ?= $(HOME)/git
 ADDR ?= 127.0.0.1:7717
 
-.PHONY: help build test test-race vet fmt lint run dev clean host-audit rebuild ci
+# Локальная модель. Параметры подтверждены спайком S1 на этом хосте:
+# эксперты MoE на CPU, остальные слои на видеокарту — 94/18 токенов в секунду.
+LOCAL_MODEL ?= $(CURDIR)/data/local_models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+MODEL_FLAGS ?= -local-model-threads 14 -local-model-gpu-layers 99 -local-model-cpu-moe 40
+
+.PHONY: help build test test-race vet fmt lint run run-quiet dev clean host-audit rebuild ci
 
 help: ## Показать список целей
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -33,7 +38,11 @@ lint: fmt vet ## Форматирование и проверки
 
 ci: lint test-race build ## Локальный CI
 
-run: build ## Запустить Бэрримора
+run: build ## Запустить Бэрримора вместе с локальной моделью
+	$(BIN) -addr $(ADDR) -data-root $(DATA_ROOT) -workspace-roots $(WORKSPACE_ROOTS) \
+		-local-model $(LOCAL_MODEL) $(MODEL_FLAGS)
+
+run-quiet: build ## Запустить без локальной модели: только нити, штат и поручения
 	$(BIN) -addr $(ADDR) -data-root $(DATA_ROOT) -workspace-roots $(WORKSPACE_ROOTS)
 
 dev: run ## Псевдоним run

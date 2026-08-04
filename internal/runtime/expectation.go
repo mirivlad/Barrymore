@@ -28,6 +28,12 @@ const (
 	// появившееся списание означает нарушение договорённости, и работу
 	// нужно прекращать, а не пересчитывать цену задним числом.
 	KindRunCostPolicy = "worker_run.cost_policy"
+	// KindLocalModelServing — локальный сервер модели должен обслуживать запросы.
+	//
+	// Это стоячее ожидание: оно не закрывается «выполненным», пока модель
+	// нужна. Пока она отвечает или грузится, ожидание остаётся ожидающим;
+	// исчезновение сервера сразу становится расхождением.
+	KindLocalModelServing = "local_model.serving"
 )
 
 // Evaluator оценивает ожидание одного вида.
@@ -51,6 +57,7 @@ func NewKinds() *Kinds {
 	k.Register(KindRunReport, evalRunReport)
 	k.Register(KindSnapshotFresh, evalSnapshotFresh)
 	k.Register(KindRunCostPolicy, evalRunCostPolicy)
+	k.Register(KindLocalModelServing, evalLocalModelServing)
 	return k
 }
 
@@ -423,6 +430,74 @@ func observedCost(obs []Observation) (total float64, seen bool) {
 		total += cost
 	}
 	return total, seen
+}
+
+// ParamsLocalModelServing — параметры стоячего ожидания по локальной модели.
+type ParamsLocalModelServing struct {
+	// Endpoint — адрес, на котором модель должна отвечать.
+	Endpoint string `json:"endpoint"`
+	// CheckEvery — как часто пересматривать ожидание.
+	CheckEvery time.Duration `json:"check_every"`
+	// SilenceAfter — через сколько отсутствие свежих наблюдений само становится
+	// расхождением. Молчание наблюдателя — это не «всё хорошо»: не зная
+	// состояния, утверждать исправность нельзя.
+	SilenceAfter time.Duration `json:"silence_after"`
+}
+
+// evalLocalModelServing проверяет, что локальная модель на месте.
+//
+// Загрузка не считается отказом: большая модель поднимается минутами, и
+// перезапускать её в это время означало бы не дать ей запуститься никогда.
+func evalLocalModelServing(exp Expectation, obs []Observation, now time.Time) (Verdict, error) {
+	var p ParamsLocalModelServing
+	if err := exp.DecodeParams(&p); err != nil {
+		return Verdict{}, fmt.Errorf("%s: разбор параметров: %w", exp.ID, err)
+	}
+	checkEvery := p.CheckEvery
+	if checkEvery <= 0 {
+		checkEvery = 30 * time.Second
+	}
+
+	o := latest(obs, ObsLocalModel)
+	if o == nil {
+		// Наблюдений ещё не было. Это не отказ: наблюдатель мог не успеть.
+		return Verdict{Outcome: OutcomePending, NextCheckAt: ptr(now.Add(checkEvery))}, nil
+	}
+
+	var got LocalModelStatePayload
+	if err := o.Decode(&got); err != nil {
+		return Verdict{}, fmt.Errorf("%s: разбор наблюдения %s: %w", exp.ID, o.ID, err)
+	}
+
+	if p.SilenceAfter > 0 && now.Sub(o.ObservedAt) > p.SilenceAfter {
+		return Verdict{
+			Outcome:  OutcomeMissed,
+			Expected: "состояние модели на " + p.Endpoint + " наблюдается регулярно",
+			Observed: fmt.Sprintf("последнее наблюдение %s назад: состояние модели неизвестно",
+				now.Sub(o.ObservedAt).Round(time.Second)),
+			Severity:  SeverityWarning,
+			DedupeKey: "local_model_unobserved:" + exp.SubjectID,
+		}, nil
+	}
+
+	switch {
+	case got.Serving:
+		return Verdict{Outcome: OutcomePending, NextCheckAt: ptr(now.Add(checkEvery))}, nil
+	case got.Loading:
+		return Verdict{Outcome: OutcomePending, NextCheckAt: ptr(now.Add(checkEvery))}, nil
+	default:
+		observed := got.Reason
+		if observed == "" {
+			observed = "сервер не отвечает"
+		}
+		return Verdict{
+			Outcome:   OutcomeMissed,
+			Expected:  "локальная модель отвечает на " + p.Endpoint,
+			Observed:  observed,
+			Severity:  SeverityWarning,
+			DedupeKey: "local_model_down:" + exp.SubjectID,
+		}, nil
+	}
 }
 
 // latest возвращает последнее по времени наблюдение указанного вида.

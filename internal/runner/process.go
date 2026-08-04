@@ -30,6 +30,20 @@ type Liveness struct {
 	Detail  string `json:"detail"`
 }
 
+// Probe возвращает вывод о состоянии процесса без экземпляра Runner.
+//
+// Нужен тем частям Бэрримора, которые ведут собственный процесс, а не запуск
+// исполнителя: правило идентичности (ADR 0006) для них то же самое.
+func Probe(caps Capabilities, id ProcessIdentity) Liveness { return checkLiveness(caps, id) }
+
+// Terminate останавливает процесс по его идентичности.
+func Terminate(caps Capabilities, id ProcessIdentity, hard bool) error {
+	return terminate(caps, id, hard)
+}
+
+// StartTicks читает момент старта процесса из /proc.
+func StartTicks(pid int) (uint64, error) { return readStartTicks(pid) }
+
 // readStartTicks читает момент старта процесса из /proc.
 func readStartTicks(pid int) (uint64, error) {
 	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
@@ -57,31 +71,43 @@ func readStartTicks(pid int) (uint64, error) {
 }
 
 // checkLiveness определяет, жив ли именно наш процесс.
+//
+// Активный unit — достаточное доказательство жизни. Неактивный доказательством
+// смерти не является: между fork и регистрацией scope есть окно, в котором
+// systemd о процессе ещё не знает и отвечает «inactive» про живой процесс.
+// Поэтому отрицательный ответ systemd проверяется по /proc, а решает точная
+// пара (pid, время старта) — она же защищает от переиспользованного номера.
 func checkLiveness(caps Capabilities, id ProcessIdentity) Liveness {
-	// Сначала systemd: unit не переиспользуется, поэтому вывод надёжнее.
+	unitState := ""
 	if id.UnitName != "" && caps.SystemdRun != "" {
-		out, err := exec.Command("systemctl", "--user", "is-active", id.UnitName).Output()
-		state := strings.TrimSpace(string(out))
-		switch {
-		case state == "active" || state == "activating":
+		out, _ := exec.Command("systemctl", "--user", "is-active", id.UnitName).Output()
+		unitState = strings.TrimSpace(string(out))
+		if unitState == "active" || unitState == "activating" {
 			return Liveness{Alive: true, Certain: true, Source: "systemd",
-				Detail: "unit " + id.UnitName + " в состоянии " + state}
-		case state != "":
-			return Liveness{Alive: false, Certain: true, Source: "systemd",
-				Detail: "unit " + id.UnitName + " в состоянии " + state}
-		case err != nil:
-			// systemd не ответил — переходим к проверке по /proc.
+				Detail: "unit " + id.UnitName + " в состоянии " + unitState}
 		}
 	}
 
+	// unitNote добавляет мнение systemd туда, где оно расходится с /proc:
+	// молчаливо предпочесть один источник другому значило бы скрыть разногласие.
+	unitNote := ""
+	if unitState != "" {
+		unitNote = fmt.Sprintf(" (unit %s в состоянии %s)", id.UnitName, unitState)
+	}
+
 	if id.PID <= 0 {
+		if unitState != "" {
+			return Liveness{Alive: false, Certain: true, Source: "systemd",
+				Detail: "unit " + id.UnitName + " в состоянии " + unitState +
+					", номер процесса неизвестен"}
+		}
 		return Liveness{Alive: false, Certain: false, Source: "none",
 			Detail: "идентификатор процесса неизвестен"}
 	}
 
 	if err := syscall.Kill(id.PID, 0); err != nil {
 		return Liveness{Alive: false, Certain: true, Source: "signal-0",
-			Detail: fmt.Sprintf("процесс %d не существует: %v", id.PID, err)}
+			Detail: fmt.Sprintf("процесс %d не существует: %v%s", id.PID, err, unitNote)}
 	}
 
 	ticks, err := readStartTicks(id.PID)
@@ -94,11 +120,11 @@ func checkLiveness(caps Capabilities, id ProcessIdentity) Liveness {
 		// из-за которой завершившийся запуск выглядел бы живым.
 		return Liveness{Alive: false, Certain: true, Source: "proc",
 			Detail: fmt.Sprintf(
-				"номер %d занят другим процессом: время старта %d вместо %d",
-				id.PID, ticks, id.StartTicks)}
+				"номер %d занят другим процессом: время старта %d вместо %d%s",
+				id.PID, ticks, id.StartTicks, unitNote)}
 	}
 	return Liveness{Alive: true, Certain: true, Source: "proc",
-		Detail: fmt.Sprintf("процесс %d жив, время старта совпадает", id.PID)}
+		Detail: fmt.Sprintf("процесс %d жив, время старта совпадает%s", id.PID, unitNote)}
 }
 
 // terminate останавливает процесс мягко, затем жёстко.
