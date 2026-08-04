@@ -45,6 +45,12 @@ func (a *shAdapter) Plan(context.Context, worker.Installation, worker.RunRequest
 	}, nil
 }
 
+func (a *shAdapter) Models(context.Context, worker.Installation) ([]worker.Model, error) {
+	return []worker.Model{{Ref: "test/free", CostTier: worker.CostFree, LastCost: -1}}, nil
+}
+
+func (a *shAdapter) Collect(context.Context, string) error { return nil }
+
 func (a *shAdapter) ParseLine(line []byte) (worker.RunEvent, bool) {
 	var m map[string]any
 	if err := json.Unmarshal(line, &m); err != nil {
@@ -299,7 +305,7 @@ func TestDetachAndReattachResumesWithoutDuplicates(t *testing.T) {
 		echo '{"summary":"первое"}'
 		while [ ! -f ` + marker + ` ]; do sleep 0.05; done
 		echo '{"summary":"второе"}'`,
-		sandbox: worker.Sandbox{WritableBinds: map[string]string{markerDir: markerDir}},
+		sandbox: worker.Sandbox{}.Writable(markerDir, markerDir),
 	}
 	// Даже при провале теста процесс не должен остаться висеть.
 	t.Cleanup(func() { _ = os.WriteFile(marker, []byte("go"), 0o600) })

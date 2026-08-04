@@ -64,7 +64,11 @@ func (a *Adapter) Descriptor() worker.Descriptor {
 			worker.CapRussian,
 		},
 		SupportsAuditOnly: true,
-		Notes:             "codex exec --json даёт JSONL-поток событий",
+		Runnable:          true,
+		// Мастер по вызову: расходует платную квоту подписки, поэтому
+		// привлекается к трудной задаче осознанно, а не по умолчанию.
+		Class: worker.ClassSpecialist,
+		Notes: "codex exec --json даёт JSONL-поток событий",
 	}
 }
 
@@ -212,18 +216,23 @@ func (a *Adapter) Plan(ctx context.Context, inst worker.Installation, req worker
 	// Внутри изоляции codex получает собственный писчий CODEX_HOME на tmpfs,
 	// а настоящий auth.json подмонтирован в него только для чтения. Значение
 	// секрета не копируется и Бэрримором не читается (06_SECURITY §6).
-	sandboxHome := "/run/barrymore/codex-home"
-	sb := worker.Sandbox{
-		TmpfsDirs:     []string{sandboxHome},
-		ReadOnlyBinds: map[string]string{},
-		WritableBinds: map[string]string{},
-		Network:       true,
+	// codex отказывается создавать вспомогательные файлы во временном каталоге,
+	// поэтому CODEX_HOME — настоящий каталог запуска, отданный на запись.
+	// Под корнем только для чтения точку монтирования создать нельзя, значит
+	// каталог должен существовать на хосте заранее.
+	sandboxHome := req.ScratchDir
+	if sandboxHome == "" {
+		return worker.RunPlan{}, fmt.Errorf("codex: не задан писчий каталог запуска")
+	}
+	// Сначала каталог отдаётся на запись, и только потом внутрь него
+	// монтируется файл учётных данных: создать точку монтирования в каталоге
+	// только для чтения невозможно. Секрет при этом не копируется.
+	sb := worker.Sandbox{Network: true}.Writable(sandboxHome, sandboxHome)
+	if req.OutputDir != "" {
+		sb = sb.Writable(req.OutputDir, req.OutputDir)
 	}
 	if hostAuth := filepath.Join(a.codexHome(), "auth.json"); fileExists(hostAuth) {
-		sb.ReadOnlyBinds[hostAuth] = filepath.Join(sandboxHome, "auth.json")
-	}
-	if req.OutputDir != "" {
-		sb.WritableBinds[req.OutputDir] = req.OutputDir
+		sb = sb.ReadOnly(hostAuth, filepath.Join(sandboxHome, "auth.json"))
 	}
 
 	return worker.RunPlan{
@@ -265,6 +274,12 @@ type codexEvent struct {
 	Type string          `json:"type"`
 	Msg  json.RawMessage `json:"msg"`
 	ID   string          `json:"id"`
+	// Message встречается на верхнем уровне, а не только внутри msg:
+	// схема внешнего инструмента неоднородна, и терять текст ошибки нельзя.
+	Message string `json:"message"`
+	Error   struct {
+		Message string `json:"message"`
+	} `json:"error"`
 }
 
 type codexMsg struct {
@@ -312,7 +327,7 @@ func (a *Adapter) ParseLine(line []byte) (worker.RunEvent, bool) {
 		ev.Summary = "рассуждение агента"
 	case strings.Contains(kindHint, "agent_message"):
 		ev.Kind = worker.RunEventMessage
-		ev.Summary = truncate(firstNonEmpty(msg.Message, msg.Text), 400)
+		ev.Summary = truncate(firstNonEmpty(msg.Message, msg.Text, ce.Message), 400)
 	case strings.Contains(kindHint, "exec_command_begin"),
 		strings.Contains(kindHint, "command_begin"):
 		ev.Kind = worker.RunEventCommand
@@ -335,13 +350,28 @@ func (a *Adapter) ParseLine(line []byte) (worker.RunEvent, bool) {
 	case strings.Contains(kindHint, "token_count"), strings.Contains(kindHint, "usage"):
 		ev.Kind = worker.RunEventTokenUsage
 		ev.Summary = "учёт токенов"
-	case strings.Contains(kindHint, "error"):
+	case strings.Contains(kindHint, "error"), strings.Contains(kindHint, "failed"):
 		ev.Kind = worker.RunEventError
-		ev.Summary = truncate(firstNonEmpty(msg.Error, msg.Message, "ошибка"), 400)
+		text := firstNonEmpty(msg.Error, msg.Message, ce.Message, ce.Error.Message, errorText(ce.Msg))
+		ev.Summary = truncate(firstNonEmpty(text, "ошибка"), 400)
+		// Исчерпание квоты распознаётся отдельно: это не сбой инструмента,
+		// а состояние учётной записи, и оно должно попасть в снимок
+		// доступности, а не утонуть в общей ошибке (сценарий E).
+		if quotaExhausted(text) {
+			ev.Detail["quota_exhausted"] = true
+			ev.Detail["quota_message"] = text
+		} else if providerRefused(text) {
+			// Отказ провайдера — не поломка инструмента. Причину снаружи
+			// не видно: за 403 может стоять и исчерпанный лимит, и проблема
+			// с учётной записью. Поэтому фиксируется сам факт отказа.
+			ev.Detail["provider_refused"] = true
+			ev.Detail["provider_message"] = text
+		}
 	case strings.Contains(kindHint, "warning"):
 		ev.Kind = worker.RunEventWarning
 		ev.Summary = truncate(firstNonEmpty(msg.Message, "предупреждение"), 400)
-	case strings.Contains(kindHint, "task_started"), strings.Contains(kindHint, "session"):
+	case strings.Contains(kindHint, "task_started"), strings.Contains(kindHint, "session"),
+		strings.Contains(kindHint, "thread.started"), strings.Contains(kindHint, "turn."):
 		ev.Kind = worker.RunEventAction
 		ev.Summary = "codex: " + kindHint
 	default:
@@ -350,6 +380,10 @@ func (a *Adapter) ParseLine(line []byte) (worker.RunEvent, bool) {
 	}
 	return ev, true
 }
+
+// Collect ничего не делает: codex сам пишет итоговое сообщение файлом
+// через -o, поэтому обязательный артефакт уже на месте.
+func (a *Adapter) Collect(context.Context, string) error { return nil }
 
 func commandString(v any) string {
 	switch c := v.(type) {
@@ -368,6 +402,48 @@ func commandString(v any) string {
 	}
 }
 
+// quotaExhausted распознаёт сообщение провайдера об исчерпанном лимите.
+//
+// Бэрримор не обходит лимиты (01_PRODUCT_BOUNDARY §2.7); он лишь честно
+// фиксирует состояние и перестаёт считать исполнителя доступным.
+func quotaExhausted(text string) bool {
+	lower := strings.ToLower(text)
+	markers := []string{
+		"usage limit", "rate limit", "quota", "insufficient_quota",
+		"purchase more credits", "429",
+	}
+	for _, m := range markers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// providerRefused распознаёт отказ провайдера в соединении.
+func providerRefused(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "403") || strings.Contains(lower, "forbidden") ||
+		strings.Contains(lower, "401") || strings.Contains(lower, "unauthorized")
+}
+
+// errorText достаёт текст ошибки из вложенных структур события.
+func errorText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var nested struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &nested); err != nil {
+		return ""
+	}
+	return firstNonEmpty(nested.Error.Message, nested.Message)
+}
+
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {
@@ -383,4 +459,61 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+// modelsCache — локальный кэш codex со списком моделей учётной записи.
+type modelsCache struct {
+	FetchedAt string `json:"fetched_at"`
+	Models    []struct {
+		Slug        string `json:"slug"`
+		DisplayName string `json:"display_name"`
+	} `json:"models"`
+}
+
+// Models перечисляет модели codex из его собственного локального кэша.
+//
+// Запрос к провайдеру не выполняется: список читается из файла, который codex
+// обновляет сам. Все модели относятся к подписке — отдельного счёта нет, но
+// ресурс конечен, поэтому бесплатными они не считаются.
+func (a *Adapter) Models(ctx context.Context, inst worker.Installation) ([]worker.Model, error) {
+	if inst.ExecutablePath == "" {
+		return nil, nil
+	}
+	path := filepath.Join(a.codexHome(), "models_cache.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Кэша нет — придумывать список нельзя.
+			return nil, nil
+		}
+		return nil, fmt.Errorf("чтение кэша моделей codex: %w", err)
+	}
+
+	var cache modelsCache
+	if err := json.Unmarshal(data, &cache); err != nil {
+		return nil, fmt.Errorf("разбор кэша моделей codex: %w", err)
+	}
+
+	now := a.Now()
+	evidence := "из локального кэша codex"
+	if cache.FetchedAt != "" {
+		evidence += " от " + cache.FetchedAt
+	}
+
+	out := make([]worker.Model, 0, len(cache.Models))
+	for i, m := range cache.Models {
+		if m.Slug == "" {
+			continue
+		}
+		out = append(out, worker.Model{
+			Ref: m.Slug, Provider: "openai", Name: m.DisplayName,
+			// Подписка, а не бесплатность: квота конечна и уже была исчерпана.
+			CostTier: worker.CostSubscription,
+			Source:   "cli-cache", Evidence: evidence,
+			Confidence: 0.8, LastCost: -1,
+			IsDefault:  i == 0,
+			ObservedAt: now,
+		})
+	}
+	return out, nil
 }

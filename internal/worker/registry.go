@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -92,6 +93,11 @@ func (r *Registry) Discover(ctx context.Context, actor event.Actor) (DiscoverRes
 		if err := r.recordAvailability(ctx, adapter, w, inst, actor); err != nil {
 			return res, err
 		}
+		if err := r.refreshModels(ctx, adapter, w, inst, actor); err != nil {
+			// Список моделей — полезное, но не обязательное сведение:
+			// без него исполнитель просто не получит поручения.
+			r.log().Warn("каталог моделей не обновлён", "worker", w.ID, "error", err)
+		}
 		view, err := r.View(ctx, w.ID)
 		if err != nil {
 			return res, err
@@ -125,6 +131,7 @@ func (r *Registry) upsert(ctx context.Context, desc Descriptor, inst Installatio
 		Enabled:        true,
 		AuthState:      inst.AuthState,
 		CostPolicy:     desc.CostPolicy,
+		Class:          orDefault(desc.Class, ClassRoutine),
 		DiscoveredAt:   now,
 		LastProbeAt:    &now,
 		Notes:          desc.Notes,
@@ -136,6 +143,7 @@ func (r *Registry) upsert(ctx context.Context, desc Descriptor, inst Installatio
 		w.DiscoveredAt = existing.DiscoveredAt
 		w.TrustLevel = existing.TrustLevel
 		w.Enabled = existing.Enabled
+		w.PreferredModel = existing.PreferredModel
 		eventType = EvProbed
 	} else {
 		w.ID = ids.New(ids.Worker)
@@ -293,7 +301,20 @@ func (r *Registry) View(ctx context.Context, id string) (View, error) {
 	if err != nil {
 		return View{}, err
 	}
-	return View{Worker: w, Capabilities: caps, Availability: av, AvailabilityFresh: fresh}, nil
+	models, err := r.Models(ctx, id)
+	if err != nil {
+		return View{}, err
+	}
+	free := 0
+	for _, m := range models {
+		if m.Free() {
+			free++
+		}
+	}
+	return View{
+		Worker: w, Capabilities: caps, Availability: av, AvailabilityFresh: fresh,
+		Models: models, FreeModels: free,
+	}, nil
 }
 
 // Availability возвращает последнюю известную доступность и её свежесть.
@@ -408,6 +429,10 @@ type Ranked struct {
 	Blocked bool     `json:"blocked"`
 	// BlockReason объясняет, почему исполнитель не может взять поручение.
 	BlockReason string `json:"block_reason,omitempty"`
+	// Model — модель, выбранная под политику стоимости.
+	Model Model `json:"model"`
+	// ModelReason объясняет выбор модели.
+	ModelReason string `json:"model_reason,omitempty"`
 }
 
 // RankRequest — условия отбора.
@@ -418,6 +443,11 @@ type RankRequest struct {
 	AuditOnly bool
 	// RequireRunnable отсекает adapter'ы, не умеющие запускать поручения.
 	RequireRunnable bool
+	// ModelPolicy задаёт допустимую стоимость моделей.
+	ModelPolicy ModelPolicy
+	// Hard помечает задачу как трудную: только тогда имеет смысл беспокоить
+	// мастера по вызову. Обычная работа идёт силами повседневных исполнителей.
+	Hard bool
 }
 
 // Rank строит объяснимый список кандидатов.
@@ -429,6 +459,7 @@ func (r *Registry) Rank(ctx context.Context, req RankRequest) ([]Ranked, error) 
 	if err != nil {
 		return nil, err
 	}
+	now := r.clock.Now()
 	out := make([]Ranked, 0, len(views))
 
 	for _, v := range views {
@@ -441,13 +472,7 @@ func (r *Registry) Rank(ctx context.Context, req RankRequest) ([]Ranked, error) 
 		}
 
 		adapter, hasAdapter := r.adapters[v.Worker.AdapterID]
-		runnable := false
-		if hasAdapter {
-			if _, err := adapter.Plan(ctx, Installation{ExecutablePath: v.Worker.ExecutablePath},
-				RunRequest{WorkDir: "/", RunID: "probe"}); err == nil {
-				runnable = true
-			}
-		}
+		runnable := hasAdapter && adapter.Descriptor().Runnable
 		if req.RequireRunnable && !runnable {
 			rk.Blocked = true
 			rk.BlockReason = "adapter обнаруживает исполнителя, но не умеет запускать поручения"
@@ -490,6 +515,52 @@ func (r *Registry) Rank(ctx context.Context, req RankRequest) ([]Ranked, error) 
 				rk.Reasons = append(rk.Reasons,
 					"собственного read-only режима нет: audit-only держится только на внешней изоляции")
 			}
+		}
+
+		// Класс исполнителя. Повседневная работа не должна расходовать
+		// платную квоту специалистов без надобности.
+		class := orDefault(v.Worker.Class, ClassRoutine)
+		switch {
+		case class == ClassSpecialist && !req.ModelPolicy.AllowSpecialists:
+			rk.Blocked = true
+			rk.BlockReason = "мастер по вызову: политика стоимости не разрешает его привлекать"
+			out = append(out, rk)
+			continue
+		case class == ClassSpecialist && !req.Hard:
+			// Не блокируем: владелец может выбрать специалиста вручную.
+			// Но по умолчанию он уступает повседневным исполнителям.
+			rk.Score -= 2.0
+			rk.Reasons = append(rk.Reasons,
+				"мастер по вызову: для обычной задачи предпочтительнее повседневный исполнитель")
+		case class == ClassSpecialist:
+			rk.Score += 1.0
+			rk.Reasons = append(rk.Reasons, "мастер по вызову для трудной задачи")
+		default:
+			rk.Score += 0.5
+			rk.Reasons = append(rk.Reasons, "повседневный исполнитель")
+		}
+
+		// Модель выбирается здесь же: без допустимой модели поручение
+		// не имеет смысла, а стоимость определяет Бэрримор, а не исполнитель.
+		model, modelReason, modelErr := SelectModel(
+			v.Models, req.ModelPolicy, v.Worker.PreferredModel, now)
+		if modelErr != nil {
+			rk.Blocked = true
+			rk.BlockReason = modelErr.Error()
+			out = append(out, rk)
+			continue
+		}
+		rk.Model = model
+		rk.ModelReason = modelReason
+		rk.Reasons = append(rk.Reasons, modelReason)
+		if model.Free() {
+			rk.Score += 1.5
+		} else if model.CostTier == CostSubscription {
+			rk.Score += 0.25
+		}
+		if stale, note := v.ModelsStale(now); stale {
+			rk.Score -= 0.5
+			rk.Reasons = append(rk.Reasons, note)
 		}
 
 		switch v.Availability.Status {
@@ -541,6 +612,8 @@ func (r *Registry) Projections(reg *projection.Registry) {
 	reg.On(EvProbed, projectUpsert)
 	reg.On(EvUpdated, projectUpsert)
 	reg.On(EvTrustChanged, projectTrust)
+	reg.On(EvModelsObserved, projectModels)
+	reg.On(EvModelCostObserved, projectModelCost)
 	reg.OnAudit(EvAvailabilityObserve, EvCapabilityObserved)
 }
 
@@ -550,4 +623,159 @@ func parseTS(s string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("разбор времени %q: %w", s, err)
 	}
 	return t.UTC(), nil
+}
+
+// log возвращает логгер реестра; отдельного поля нет, поэтому используется общий.
+func (r *Registry) log() *slog.Logger { return slog.Default() }
+
+// refreshModels обновляет каталог моделей исполнителя.
+func (r *Registry) refreshModels(ctx context.Context, a Adapter, w Worker, inst Installation, actor event.Actor) error {
+	models, err := a.Models(ctx, inst)
+	if err != nil {
+		return err
+	}
+	if len(models) == 0 {
+		return nil
+	}
+	now := r.clock.Now()
+	for i := range models {
+		models[i].ID = ids.New("mdl")
+		models[i].WorkerID = w.ID
+		if models[i].ObservedAt.IsZero() {
+			models[i].ObservedAt = now
+		}
+		if models[i].CostTier == "" {
+			models[i].CostTier = CostUnknown
+		}
+	}
+
+	// Отметки о списаниях переносятся на обновлённый список: иначе новая
+	// пометка "free" в названии стёрла бы память о том, что модель платная.
+	known, err := r.Models(ctx, w.ID)
+	if err != nil {
+		return err
+	}
+	models = CarryCharges(models, known)
+
+	p := modelsPayload{WorkerID: w.ID, Models: models, ObservedAt: now}
+	_, err = r.journal.Write(ctx, func(tx *sql.Tx, tw *event.TxWriter) error {
+		if _, err := tw.Append(ctx, event.Request{
+			StreamType: StreamType, StreamID: w.ID, ExpectedRevision: event.AnyRevision,
+			EventType: EvModelsObserved, Actor: actor, Payload: p,
+		}); err != nil {
+			return err
+		}
+		return applyModels(ctx, tx, p)
+	})
+	return err
+}
+
+// RefreshModels перечитывает каталог моделей по требованию.
+func (r *Registry) RefreshModels(ctx context.Context, workerID string, actor event.Actor) (View, error) {
+	w, err := r.Get(ctx, workerID)
+	if err != nil {
+		return View{}, err
+	}
+	adapter, ok := r.adapters[w.AdapterID]
+	if !ok {
+		return View{}, fmt.Errorf("для исполнителя %s не зарегистрирован adapter %q",
+			workerID, w.AdapterID)
+	}
+	inst, found, err := adapter.Discover(ctx)
+	if err != nil {
+		return View{}, err
+	}
+	if !found {
+		return View{}, fmt.Errorf("исполнитель %s больше не найден в PATH", workerID)
+	}
+	if err := r.refreshModels(ctx, adapter, w, inst, actor); err != nil {
+		return View{}, err
+	}
+	return r.View(ctx, workerID)
+}
+
+// Models возвращает каталог моделей исполнителя.
+func (r *Registry) Models(ctx context.Context, workerID string) ([]Model, error) {
+	rows, err := r.db.Reader().QueryContext(ctx, `
+		SELECT id, worker_id, model_ref, provider, name, cost_tier, source, evidence,
+		       is_default, observed_at
+		  FROM worker_models WHERE worker_id = ?
+		 ORDER BY CASE cost_tier WHEN 'free' THEN 0 WHEN 'subscription' THEN 1
+		                         WHEN 'unknown' THEN 2 ELSE 3 END, model_ref`, workerID)
+	if err != nil {
+		return nil, fmt.Errorf("чтение моделей %s: %w", workerID, err)
+	}
+	defer rows.Close()
+
+	out := []Model{}
+	for rows.Next() {
+		var (
+			m          Model
+			isDefault  int
+			observedAt string
+		)
+		if err := rows.Scan(&m.ID, &m.WorkerID, &m.Ref, &m.Provider, &m.Name,
+			&m.CostTier, &m.Source, &m.Evidence, &isDefault, &observedAt); err != nil {
+			return nil, err
+		}
+		m.IsDefault = isDefault == 1
+		if m.ObservedAt, err = parseTS(observedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// SetPreferredModel фиксирует ручной выбор модели владельцем.
+func (r *Registry) SetPreferredModel(ctx context.Context, workerID, modelRef string) error {
+	if modelRef != "" {
+		models, err := r.Models(ctx, workerID)
+		if err != nil {
+			return err
+		}
+		known := false
+		for _, m := range models {
+			if m.Ref == modelRef {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return fmt.Errorf("модель %q не значится в каталоге исполнителя", modelRef)
+		}
+	}
+	_, err := r.db.Writer().ExecContext(ctx,
+		`UPDATE workers SET preferred_model = ? WHERE id = ?`, modelRef, workerID)
+	if err != nil {
+		return fmt.Errorf("сохранение выбранной модели %s: %w", workerID, err)
+	}
+	return nil
+}
+
+// MarkModelCharged фиксирует, что за модель списали деньги.
+//
+// Модель выбиралась как бесплатная, значит провайдер изменил условия.
+// Отметка постоянная: повторно предлагать такую модель как бесплатную нельзя.
+func (r *Registry) MarkModelCharged(ctx context.Context, workerID, modelRef string, cost float64, at time.Time) error {
+	if workerID == "" || modelRef == "" {
+		return nil
+	}
+	p := modelCostPayload{
+		WorkerID: workerID, ModelRef: modelRef, CostTier: CostPaid,
+		Evidence: fmt.Sprintf(
+			"выбиралась как бесплатная, но запуск списал %.6f: провайдер изменил условия", cost),
+		Cost: cost, ObservedAt: at,
+	}
+	_, err := r.journal.Write(ctx, func(tx *sql.Tx, tw *event.TxWriter) error {
+		if _, err := tw.Append(ctx, event.Request{
+			StreamType: StreamType, StreamID: workerID, ExpectedRevision: event.AnyRevision,
+			EventType: EvModelCostObserved, Actor: event.Actor{Type: event.ActorRuntime},
+			Payload: p,
+		}); err != nil {
+			return err
+		}
+		return applyModelCost(ctx, tx, p)
+	})
+	return err
 }

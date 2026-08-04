@@ -27,7 +27,15 @@ type Manifest struct {
 	AuthPaths            []string `yaml:"authPaths" json:"auth_paths"`
 	DeclaredCapabilities []string `yaml:"declaredCapabilities" json:"declared_capabilities"`
 	SupportsAuditOnly    bool     `yaml:"supportsAuditOnly" json:"supports_audit_only"`
+	Class                string   `yaml:"class" json:"class"`
 	Notes                string   `yaml:"notes" json:"notes"`
+}
+
+func orDefault(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
 }
 
 // ManifestAdapter умеет обнаруживать исполнителя, но не умеет его запускать.
@@ -63,6 +71,7 @@ func (a *ManifestAdapter) Descriptor() Descriptor {
 		CostPolicy:           a.M.CostPolicy,
 		DeclaredCapabilities: a.M.DeclaredCapabilities,
 		SupportsAuditOnly:    a.M.SupportsAuditOnly,
+		Class:                orDefault(a.M.Class, ClassRoutine),
 		Notes:                a.M.Notes,
 	}
 }
@@ -158,6 +167,14 @@ func (a *ManifestAdapter) Plan(context.Context, Installation, RunRequest) (RunPl
 			"нужен полноценный adapter с планом команды и разбором событий", a.M.ID)
 }
 
+// Collect ничего не делает: adapter не умеет запускать поручения.
+func (a *ManifestAdapter) Collect(context.Context, string) error { return nil }
+
+// Models не перечисляет модели: манифест этого не описывает.
+func (a *ManifestAdapter) Models(context.Context, Installation) ([]Model, error) {
+	return nil, nil
+}
+
 // ParseLine сохраняет строку как неразобранное событие.
 func (a *ManifestAdapter) ParseLine(line []byte) (RunEvent, bool) {
 	s := strings.TrimSpace(string(line))
@@ -175,21 +192,14 @@ func firstLine(s string) string {
 	return s
 }
 
-// BuiltinManifests — исполнители, обнаруживаемые из коробки.
+// BuiltinManifests — исполнители, которых Бэрримор умеет обнаруживать,
+// но пока не умеет запускать.
 //
-// Список отражает host audit: Claude Code в нём нет, потому что `claude`
-// на этом хосте не установлен (ADR 0005).
+// opencode и hermes здесь отсутствуют намеренно: у них есть полноценные
+// адаптеры. Claude Code остаётся в списке, чтобы запись появилась сама,
+// если `claude` будет установлен (ADR 0005).
 func BuiltinManifests() []Manifest {
 	return []Manifest{
-		{
-			ID: "opencode", DisplayName: "OpenCode",
-			Executables: []string{"opencode"}, VersionArgs: []string{"--version"},
-			DefaultTrust: TrustWorktreeWrite, CostPolicy: "provider-account",
-			AuthPaths:            []string{"~/.config/opencode", "~/.opencode"},
-			DeclaredCapabilities: []string{CapCodeEdit, CapRepositoryAudit, CapStructuredOutput},
-			SupportsAuditOnly:    false,
-			Notes:                "есть headless-режим serve и run --format json",
-		},
 		{
 			ID: "pi", DisplayName: "Pi Coding Agent",
 			Executables: []string{"pi"}, VersionArgs: []string{"--version"},
@@ -205,16 +215,10 @@ func BuiltinManifests() []Manifest {
 			DeclaredCapabilities: []string{CapCodeEdit},
 		},
 		{
-			ID: "hermes", DisplayName: "Hermes Agent",
-			Executables: []string{"hermes"}, VersionArgs: []string{"--version"},
-			DefaultTrust: TrustProposalOnly, CostPolicy: "provider-account",
-			AuthPaths:            []string{"~/.hermes", "~/.config/hermes"},
-			DeclaredCapabilities: []string{CapCodeEdit, CapWebResearch},
-		},
-		{
 			ID: "claude-code", DisplayName: "Claude Code",
 			Executables: []string{"claude"}, VersionArgs: []string{"--version"},
 			DefaultTrust: TrustWorktreeWrite, CostPolicy: "provider-account",
+			Class:                ClassSpecialist,
 			AuthPaths:            []string{"~/.claude"},
 			DeclaredCapabilities: []string{CapCodeEdit, CapRepositoryAudit, CapTests},
 			Notes:                "на момент host audit не установлен; запись активируется при появлении в PATH",

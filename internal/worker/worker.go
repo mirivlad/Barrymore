@@ -61,18 +61,25 @@ const (
 
 // Worker — запись реестра об установленном исполнителе.
 type Worker struct {
-	ID             string     `json:"id"`
-	AdapterID      string     `json:"adapter_id"`
-	DisplayName    string     `json:"display_name"`
-	ExecutablePath string     `json:"executable_path,omitempty"`
-	Version        string     `json:"version,omitempty"`
-	TrustLevel     string     `json:"trust_level"`
-	Enabled        bool       `json:"enabled"`
-	AuthState      string     `json:"auth_state"`
-	CostPolicy     string     `json:"cost_policy"`
-	DiscoveredAt   time.Time  `json:"discovered_at"`
-	LastProbeAt    *time.Time `json:"last_probe_at,omitempty"`
-	Notes          string     `json:"notes,omitempty"`
+	ID             string `json:"id"`
+	AdapterID      string `json:"adapter_id"`
+	DisplayName    string `json:"display_name"`
+	ExecutablePath string `json:"executable_path,omitempty"`
+	Version        string `json:"version,omitempty"`
+	TrustLevel     string `json:"trust_level"`
+	Enabled        bool   `json:"enabled"`
+	AuthState      string `json:"auth_state"`
+	CostPolicy     string `json:"cost_policy"`
+	// Class различает повседневного исполнителя и мастера по вызову.
+	Class string `json:"class"`
+	// PreferredModel — ручной выбор владельца; пустая строка отдаёт выбор runtime.
+	PreferredModel string `json:"preferred_model,omitempty"`
+	// ModelsRefreshedAt — когда каталог моделей обновлялся целиком.
+	// Составы бесплатных моделей меняются, поэтому у каталога есть срок годности.
+	ModelsRefreshedAt *time.Time `json:"models_refreshed_at,omitempty"`
+	DiscoveredAt      time.Time  `json:"discovered_at"`
+	LastProbeAt       *time.Time `json:"last_probe_at,omitempty"`
+	Notes             string     `json:"notes,omitempty"`
 }
 
 // Capability — подтверждённая возможность с основанием.
@@ -108,6 +115,10 @@ type View struct {
 	Availability Availability `json:"availability"`
 	// AvailabilityFresh показывает, действителен ли снимок прямо сейчас.
 	AvailabilityFresh bool `json:"availability_fresh"`
+	// Models — известный каталог моделей исполнителя.
+	Models []Model `json:"models"`
+	// FreeModels — сколько из них бесплатны.
+	FreeModels int `json:"free_models"`
 }
 
 // Installation — найденная установка исполнителя.
@@ -129,8 +140,16 @@ type Descriptor struct {
 	// то есть низкая уверенность до подтверждения запуском.
 	DeclaredCapabilities []string `json:"declared_capabilities"`
 	// SupportsAuditOnly сообщает, умеет ли adapter собственный read-only режим.
-	SupportsAuditOnly bool   `json:"supports_audit_only"`
-	Notes             string `json:"notes,omitempty"`
+	SupportsAuditOnly bool `json:"supports_audit_only"`
+	// Runnable отличает полноценный adapter от того, который умеет только
+	// обнаруживать исполнителя. Свойство объявляется явно, а не выводится
+	// пробным вызовом построения команды.
+	Runnable bool `json:"runnable"`
+	// Class различает повседневного исполнителя и мастера по вызову.
+	// Повседневная работа идёт на бесплатных моделях; специалист привлекается
+	// осознанно, потому что расходует платную квоту.
+	Class string `json:"class"`
+	Notes string `json:"notes,omitempty"`
 }
 
 // RunEventKind — виды наблюдаемых событий запуска (05_STAFF_AND_DELEGATION §12).
@@ -169,27 +188,64 @@ type RunRequest struct {
 	AuditOnly bool
 	// OutputDir — куда adapter кладёт артефакты.
 	OutputDir string
+	// ScratchDir — настоящий писчий каталог исполнителя внутри изоляции.
+	// Нужен там, где инструмент отказывается работать во временном каталоге.
+	ScratchDir string
 	// ReportSchemaPath — JSON Schema обязательного отчёта, если adapter умеет.
 	ReportSchemaPath string
-	Model            string
-	Timeout          time.Duration
+	// Model — строка модели, выбранная runtime по политике стоимости.
+	Model   string
+	Timeout time.Duration
+}
+
+// Виды монтирования внутри изоляции.
+const (
+	// MountTmpfs — пустой писчий каталог, исчезающий вместе с запуском.
+	MountTmpfs = "tmpfs"
+	// MountReadOnly — настоящий путь, доступный только для чтения.
+	MountReadOnly = "ro"
+	// MountWritable — настоящий путь, доступный на запись.
+	MountWritable = "rw"
+)
+
+// Mount — одно монтирование.
+type Mount struct {
+	Kind string
+	Src  string
+	Dst  string
 }
 
 // Sandbox описывает, что исполнителю нужно внутри изоляции.
 //
 // ADR 0007: рабочий каталог остаётся доступным только для чтения. Adapter
 // перечисляет ровно то, без чего процесс не запустится, а не «дайте всё».
+//
+// Порядок монтирований значим и потому задаётся списком, а не набором:
+// одному инструменту нужно положить файл только для чтения внутрь писчего
+// каталога, другому — открыть на запись подкаталог внутри каталога только
+// для чтения. Сортировка по видам ломала бы и то, и другое.
 type Sandbox struct {
-	// TmpfsDirs — каталоги, которые должны быть записываемыми и эфемерными.
-	// Через них исполнителю дают писать, не открывая доступ к настоящим файлам.
-	TmpfsDirs []string
-	// ReadOnlyBinds — путь на хосте → путь внутри изоляции.
-	// Так учётные данные становятся видны процессу, не будучи скопированными.
-	ReadOnlyBinds map[string]string
-	// WritableBinds — настоящие каталоги, доступные на запись (артефакты).
-	WritableBinds map[string]string
+	Mounts []Mount
 	// Network требуется, если исполнитель обращается к своему провайдеру.
 	Network bool
+}
+
+// Tmpfs добавляет эфемерный писчий каталог.
+func (s Sandbox) Tmpfs(dir string) Sandbox {
+	s.Mounts = append(s.Mounts, Mount{Kind: MountTmpfs, Dst: dir})
+	return s
+}
+
+// ReadOnly добавляет путь только для чтения.
+func (s Sandbox) ReadOnly(src, dst string) Sandbox {
+	s.Mounts = append(s.Mounts, Mount{Kind: MountReadOnly, Src: src, Dst: dst})
+	return s
+}
+
+// Writable добавляет путь, доступный на запись.
+func (s Sandbox) Writable(src, dst string) Sandbox {
+	s.Mounts = append(s.Mounts, Mount{Kind: MountWritable, Src: src, Dst: dst})
+	return s
 }
 
 // RunPlan — как именно запускать процесс.
@@ -206,6 +262,9 @@ type RunPlan struct {
 	ExpectedArtifacts []string
 	// Sandbox — требования к изоляции.
 	Sandbox Sandbox
+	// Dir — рабочий каталог процесса. Многие CLI не имеют флага каталога
+	// и опираются на текущий каталог запуска.
+	Dir string
 }
 
 // Adapter описывает, как обращаться с конкретным исполнителем.
@@ -218,10 +277,16 @@ type Adapter interface {
 	Discover(ctx context.Context) (Installation, bool, error)
 	// Availability оценивает доступность по локально наблюдаемым признакам.
 	Availability(ctx context.Context, inst Installation) (Availability, error)
+	// Models перечисляет доступные модели. Запрос должен быть бесплатным:
+	// список моделей нельзя получать ценой платного вызова.
+	Models(ctx context.Context, inst Installation) ([]Model, error)
 	// Plan строит план запуска.
 	Plan(ctx context.Context, inst Installation, req RunRequest) (RunPlan, error)
 	// ParseLine превращает строку stdout в событие. ok=false — строка не разобрана.
 	ParseLine(line []byte) (ev RunEvent, ok bool)
+	// Collect приводит вывод к обязательным артефактам в <runDir>/out.
+	// У инструментов, которые сами пишут отчёт файлом, ничего не делает.
+	Collect(ctx context.Context, runDir string) error
 }
 
 // Типы событий штата.
@@ -231,6 +296,8 @@ const (
 	EvProbed              = "worker.probed"
 	EvAvailabilityObserve = "worker.availability.observed"
 	EvCapabilityObserved  = "worker.capability.observed"
+	EvModelsObserved      = "worker.models.observed"
+	EvModelCostObserved   = "worker.model.cost.observed"
 	EvTrustChanged        = "worker.trust.changed"
 )
 
@@ -238,7 +305,7 @@ const (
 const StreamType = "worker"
 
 // ProjectionTables — таблицы проекций штата.
-var ProjectionTables = []string{"workers", "worker_capabilities"}
+var ProjectionTables = []string{"workers", "worker_capabilities", "worker_models"}
 
 // SnapshotScope возвращает область снимка доступности исполнителя.
 func SnapshotScope(workerID string) string { return "worker:" + workerID }

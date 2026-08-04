@@ -21,6 +21,13 @@ const (
 	KindRunReport = "worker_run.report"
 	// KindSnapshotFresh — снимок доступности должен быть свежим к моменту решения.
 	KindSnapshotFresh = "snapshot.fresh"
+	// KindRunCostPolicy — на бесплатной модели списаний быть не должно.
+	//
+	// Бесплатность определяется до запуска, по пометке провайдера в названии.
+	// Это ожидание — страховка на случай, когда провайдер изменил условия:
+	// появившееся списание означает нарушение договорённости, и работу
+	// нужно прекращать, а не пересчитывать цену задним числом.
+	KindRunCostPolicy = "worker_run.cost_policy"
 )
 
 // Evaluator оценивает ожидание одного вида.
@@ -43,6 +50,7 @@ func NewKinds() *Kinds {
 	k.Register(KindRunNoWrites, evalRunNoWrites)
 	k.Register(KindRunReport, evalRunReport)
 	k.Register(KindSnapshotFresh, evalSnapshotFresh)
+	k.Register(KindRunCostPolicy, evalRunCostPolicy)
 	return k
 }
 
@@ -343,6 +351,78 @@ func evalSnapshotFresh(exp Expectation, obs []Observation, now time.Time) (Verdi
 		v.NextCheckAt = got.ValidUntil
 	}
 	return v, nil
+}
+
+// ParamsRunCostPolicy — параметры ожидания по стоимости.
+type ParamsRunCostPolicy struct {
+	// MaxCost — предел суммарного списания. Ноль означает «списаний быть не должно».
+	MaxCost float64 `json:"max_cost"`
+	// Model — модель, которой разрешён запуск.
+	Model string `json:"model,omitempty"`
+	// PolicyName объясняет, откуда взялся предел.
+	PolicyName string `json:"policy_name,omitempty"`
+}
+
+// evalRunCostPolicy ловит списание там, где его быть не должно.
+func evalRunCostPolicy(exp Expectation, obs []Observation, now time.Time) (Verdict, error) {
+	var p ParamsRunCostPolicy
+	if err := exp.DecodeParams(&p); err != nil {
+		return Verdict{}, fmt.Errorf("%s: разбор параметров: %w", exp.ID, err)
+	}
+
+	total, seen := observedCost(obs)
+	if total > p.MaxCost {
+		return Verdict{
+			Outcome: OutcomeMissed,
+			Expected: fmt.Sprintf("списание не превышает %.6f (%s, модель %s)",
+				p.MaxCost, p.PolicyName, p.Model),
+			Observed: fmt.Sprintf(
+				"исполнитель сообщил о списании %.6f: модель, выбранная как бесплатная, "+
+					"больше таковой не является", total),
+			Severity:  SeverityCritical,
+			DedupeKey: "cost_violation:" + exp.SubjectID,
+		}, nil
+	}
+
+	// Завершившийся запуск в пределах бюджета закрывает ожидание.
+	if latest(obs, ObsRunExited) != nil {
+		observedNote := "списаний не наблюдалось"
+		if seen {
+			observedNote = fmt.Sprintf("суммарное списание %.6f", total)
+		}
+		return Verdict{
+			Outcome:  OutcomeSatisfied,
+			Expected: fmt.Sprintf("списание не превышает %.6f", p.MaxCost),
+			Observed: observedNote,
+		}, nil
+	}
+	return Verdict{Outcome: OutcomePending}, nil
+}
+
+// observedCost суммирует стоимость, сообщённую исполнителем.
+func observedCost(obs []Observation) (total float64, seen bool) {
+	for _, o := range obs {
+		if o.Kind != ObsRunEvent {
+			continue
+		}
+		var ev struct {
+			Detail map[string]any `json:"detail"`
+		}
+		if err := o.Decode(&ev); err != nil {
+			continue
+		}
+		v, ok := ev.Detail["observed_cost"]
+		if !ok {
+			continue
+		}
+		cost, ok := v.(float64)
+		if !ok {
+			continue
+		}
+		seen = true
+		total += cost
+	}
+	return total, seen
 }
 
 // latest возвращает последнее по времени наблюдение указанного вида.

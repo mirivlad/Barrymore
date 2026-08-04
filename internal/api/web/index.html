@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Бэрримор — интерфейс оператора</title>
+<style>
+  :root {
+    --bg: #12100e; --panel: #1b1815; --line: #2e2926; --ink: #e8e2d8;
+    --muted: #9a9086; --accent: #c8a26a; --ok: #7fa87f; --warn: #c9a227; --bad: #b5645a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f3ee; --panel: #fffdfa; --line: #e2dbd0; --ink: #26221e;
+      --muted: #6f6659; --accent: #8a6a33; --ok: #3f6b3f; --warn: #8a6d10; --bad: #8f3a30;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; color: var(--accent); }
+  nav { display: flex; gap: 4px; flex-wrap: wrap; }
+  nav button {
+    background: none; border: 1px solid transparent; color: var(--muted);
+    padding: 5px 11px; border-radius: 6px; cursor: pointer; font: inherit;
+  }
+  nav button:hover { color: var(--ink); }
+  nav button[aria-current="true"] { color: var(--ink); border-color: var(--line); background: var(--panel); }
+  main { padding: 20px; max-width: 1100px; }
+  section[hidden] { display: none; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 12px;
+  }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .grow { flex: 1 1 240px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+  input, textarea, select {
+    width: 100%; background: var(--bg); color: var(--ink); font: inherit;
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px;
+  }
+  textarea { min-height: 64px; resize: vertical; }
+  button.act {
+    background: var(--accent); color: var(--bg); border: none; border-radius: 6px;
+    padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.act:hover { filter: brightness(1.08); }
+  button.ghost {
+    background: none; color: var(--ink); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 12px; font: inherit; cursor: pointer;
+  }
+  .muted { color: var(--muted); font-size: 13px; }
+  .tag {
+    display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .tag.ok { color: var(--ok); border-color: var(--ok); }
+  .tag.warn { color: var(--warn); border-color: var(--warn); }
+  .tag.bad { color: var(--bad); border-color: var(--bad); }
+  ul.plain { list-style: none; margin: 0; padding: 0; }
+  ul.plain li { padding: 9px 0; border-top: 1px solid var(--line); }
+  ul.plain li:first-child { border-top: none; }
+  pre {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+    padding: 10px; overflow-x: auto; font-size: 12.5px; margin: 8px 0 0;
+  }
+  .notes { border-left: 3px solid var(--warn); padding-left: 12px; }
+  .clickable { cursor: pointer; }
+  .clickable:hover { color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  td, th { text-align: left; padding: 5px 8px 5px 0; vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Бэрримор</h1>
+  <span class="muted">интерфейс оператора</span>
+  <nav>
+    <button data-tab="state" aria-current="true">Состояние</button>
+    <button data-tab="threads">Нити</button>
+    <button data-tab="staff">Штат</button>
+    <button data-tab="orders">Поручения</button>
+    <button data-tab="journal">Журнал</button>
+  </nav>
+  <span class="grow"></span>
+  <span id="live" class="tag">поток: подключение…</span>
+</header>
+
+<main>
+  <section id="tab-state">
+    <div class="card">
+      <h2>Что известно прямо сейчас</h2>
+      <div id="state-body" class="muted">загрузка…</div>
+    </div>
+    <div class="card">
+      <h2>Открытые расхождения</h2>
+      <ul class="plain" id="discrepancies"><li class="muted">загрузка…</li></ul>
+    </div>
+    <div class="card">
+      <h2>Ожидают решения</h2>
+      <ul class="plain" id="approvals"><li class="muted">загрузка…</li></ul>
+    </div>
+  </section>
+
+  <section id="tab-threads" hidden>
+    <div class="card">
+      <h2>Новая нить</h2>
+      <div class="row">
+        <div class="grow"><label for="th-title">Название</label>
+          <input id="th-title" placeholder="Аудит mirvmon"></div>
+        <div style="flex:0 0 180px"><label for="th-kind">Вид</label>
+          <select id="th-kind">
+            <option value="project">проект</option>
+            <option value="idea">идея</option>
+            <option value="problem">проблема</option>
+            <option value="research">исследование</option>
+            <option value="conversation">разговор</option>
+          </select></div>
+      </div>
+      <div style="margin-top:10px"><label for="th-origin">Происхождение</label>
+        <textarea id="th-origin" placeholder="почему эта нить появилась"></textarea></div>
+      <div class="row" style="margin-top:10px">
+        <button class="act" id="th-create">Создать нить</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Нити</h2>
+      <ul class="plain" id="threads"><li class="muted">загрузка…</li></ul>
+    </div>
+    <div class="card" id="thread-detail" hidden></div>
+  </section>
+
+  <section id="tab-staff" hidden>
+    <div class="card">
+      <div class="row">
+        <h2 style="margin:0">Штат</h2>
+        <span class="grow"></span>
+        <button class="act" id="discover">Обнаружить исполнителей</button>
+      </div>
+      <p class="muted" style="margin:10px 0 0">
+        Обнаружение опрашивает версии и не выполняет платных запросов.
+        Состояние квоты локально не наблюдается и честно показывается как неизвестное.
+      </p>
+    </div>
+    <ul class="plain" id="workers"><li class="muted">нажмите «Обнаружить исполнителей»</li></ul>
+  </section>
+
+  <section id="tab-orders" hidden>
+    <div class="card">
+      <h2>Новое поручение — аудит без изменений</h2>
+      <div class="row">
+        <div class="grow"><label for="wo-thread">Нить</label>
+          <select id="wo-thread"></select></div>
+        <div class="grow"><label for="wo-root">Рабочий каталог</label>
+          <input id="wo-root" placeholder="/home/…/git/mirvmon"></div>
+      </div>
+      <div style="margin-top:10px"><label for="wo-goal">Цель</label>
+        <textarea id="wo-goal" placeholder="что именно нужно выяснить"></textarea></div>
+      <div class="row" style="margin-top:10px">
+        <button class="act" id="wo-create">Сформировать поручение</button>
+        <span class="muted">первое поручение всегда только на чтение</span>
+      </div>
+      <div id="wo-candidates"></div>
+    </div>
+    <div class="card">
+      <h2>Поручения</h2>
+      <ul class="plain" id="orders"><li class="muted">загрузка…</li></ul>
+    </div>
+    <div class="card" id="order-detail" hidden></div>
+  </section>
+
+  <section id="tab-journal" hidden>
+    <div class="card">
+      <h2>Журнал событий</h2>
+      <p class="muted">Живой поток. При разрыве соединение продолжается с последнего события.</p>
+      <ul class="plain" id="journal"></ul>
+    </div>
+  </section>
+</main>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

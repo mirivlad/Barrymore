@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"sort"
 
 	"github.com/mirivlad/barrymore/internal/worker"
 )
@@ -89,12 +88,9 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 			"--die-with-parent",
 			"--new-session",
 		}
-		for _, dir := range sortedStrings(plan.Sandbox.TmpfsDirs) {
-			bw = append(bw, "--tmpfs", dir)
-		}
-		// Рабочий каталог монтируется явно и после tmpfs. Полагаться на то,
-		// что он «и так под ro-bind /», нельзя: каталог может лежать под
-		// /tmp, который стал tmpfs, и тогда исполнитель его просто не увидит.
+		// Рабочий каталог монтируется первым и явно. Полагаться на то, что
+		// он «и так под ro-bind /», нельзя: каталог может лежать под /tmp,
+		// который стал tmpfs, и тогда исполнитель его просто не увидит.
 		if opts.Workspace != "" {
 			if opts.WorkspaceWritable {
 				bw = append(bw, "--bind", opts.Workspace, opts.Workspace)
@@ -103,15 +99,24 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 				bw = append(bw, "--ro-bind", opts.Workspace, opts.Workspace)
 			}
 		}
-		// Файлы только для чтения монтируются после tmpfs: иначе tmpfs
-		// перекрыл бы точку монтирования.
-		for _, src := range sortedKeys(plan.Sandbox.ReadOnlyBinds) {
-			bw = append(bw, "--ro-bind", src, plan.Sandbox.ReadOnlyBinds[src])
+
+		// Дальше — монтирования adapter'а строго в объявленном им порядке.
+		for _, m := range plan.Sandbox.Mounts {
+			switch m.Kind {
+			case worker.MountTmpfs:
+				bw = append(bw, "--tmpfs", m.Dst)
+				profile.Writable = append(profile.Writable, m.Dst)
+			case worker.MountReadOnly:
+				bw = append(bw, "--ro-bind", m.Src, m.Dst)
+			case worker.MountWritable:
+				bw = append(bw, "--bind", m.Src, m.Dst)
+				profile.Writable = append(profile.Writable, m.Dst)
+			default:
+				return nil, profile, fmt.Errorf(
+					"runner: неизвестный вид монтирования %q для %s", m.Kind, m.Dst)
+			}
 		}
-		for _, src := range sortedKeys(plan.Sandbox.WritableBinds) {
-			bw = append(bw, "--bind", src, plan.Sandbox.WritableBinds[src])
-			profile.Writable = append(profile.Writable, plan.Sandbox.WritableBinds[src])
-		}
+
 		if !plan.Sandbox.Network {
 			bw = append(bw, "--unshare-net")
 		}
@@ -153,19 +158,4 @@ type commandOptions struct {
 	WorkspaceWritable bool
 	UnitName          string
 	ScopeProperties   []string
-}
-
-func sortedKeys(m map[string]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func sortedStrings(in []string) []string {
-	out := append([]string(nil), in...)
-	sort.Strings(out)
-	return out
 }

@@ -156,6 +156,10 @@ func (r *Runner) Start(ctx context.Context, req StartRequest) (StartResult, erro
 	}
 
 	cmd := exec.Command(argv[0], argv[1:]...)
+	// Многие CLI не имеют флага рабочего каталога и опираются на текущий.
+	if req.Plan.Dir != "" {
+		cmd.Dir = req.Plan.Dir
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.Stdin = strings.NewReader(req.Plan.Stdin)

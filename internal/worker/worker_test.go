@@ -34,10 +34,17 @@ func fakeCodex(t *testing.T, clk *clock.Fake, withAuth bool) *codex.Adapter {
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("создание поддельного codex: %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
+		t.Fatalf("создание каталога codex: %v", err)
+	}
+	// Кэш моделей codex: без него у исполнителя нет каталога, и он не
+	// может быть выбран — это отдельное проверяемое поведение.
+	if err := os.WriteFile(filepath.Join(home, ".codex", "models_cache.json"),
+		[]byte(`{"fetched_at":"2026-08-04T00:00:00Z","models":[{"slug":"gpt-5.6-sol","display_name":"GPT"}]}`),
+		0o600); err != nil {
+		t.Fatalf("создание кэша моделей: %v", err)
+	}
 	if withAuth {
-		if err := os.MkdirAll(filepath.Join(home, ".codex"), 0o700); err != nil {
-			t.Fatalf("создание каталога учётных данных: %v", err)
-		}
 		if err := os.WriteFile(filepath.Join(home, ".codex", "auth.json"),
 			[]byte(`{"secret":"не должен читаться"}`), 0o600); err != nil {
 			t.Fatalf("создание файла учётных данных: %v", err)
@@ -125,6 +132,7 @@ func TestMissingAuthBlocksSelection(t *testing.T) {
 		RequiredCapabilities: []string{worker.CapRepositoryAudit},
 		AuditOnly:            true,
 		RequireRunnable:      true,
+		ModelPolicy:          worker.PreferFree(),
 	})
 	if err != nil {
 		t.Fatalf("ранжирование: %v", err)
@@ -151,6 +159,7 @@ func TestStaleSnapshotLowersScoreInsteadOfInventingAvailability(t *testing.T) {
 	fresh, err := reg.Rank(ctx, worker.RankRequest{
 		RequiredCapabilities: []string{worker.CapRepositoryAudit},
 		AuditOnly:            true, RequireRunnable: true,
+		ModelPolicy: worker.PreferFree(),
 	})
 	if err != nil {
 		t.Fatalf("ранжирование до устаревания: %v", err)
@@ -168,6 +177,7 @@ func TestStaleSnapshotLowersScoreInsteadOfInventingAvailability(t *testing.T) {
 	stale, err := reg.Rank(ctx, worker.RankRequest{
 		RequiredCapabilities: []string{worker.CapRepositoryAudit},
 		AuditOnly:            true, RequireRunnable: true,
+		ModelPolicy: worker.PreferFree(),
 	})
 	if err != nil {
 		t.Fatalf("ранжирование после устаревания: %v", err)
@@ -200,6 +210,7 @@ func TestManifestAdapterCannotBeSelectedForRun(t *testing.T) {
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho 1.17.9\n"), 0o755); err != nil {
 		t.Fatalf("создание поддельного opencode: %v", err)
 	}
+	// Манифест не объявляет Runnable, поэтому adapter не должен допускаться к запуску.
 	ma := worker.NewManifestAdapter(worker.Manifest{
 		ID: "opencode", DisplayName: "OpenCode", Executables: []string{"opencode"},
 		VersionArgs: []string{"--version"}, DefaultTrust: worker.TrustWorktreeWrite,
@@ -218,6 +229,7 @@ func TestManifestAdapterCannotBeSelectedForRun(t *testing.T) {
 	ranked, err := reg.Rank(ctx, worker.RankRequest{
 		RequiredCapabilities: []string{worker.CapRepositoryAudit},
 		RequireRunnable:      true,
+		ModelPolicy:          worker.PreferFree(),
 	})
 	if err != nil {
 		t.Fatalf("ранжирование: %v", err)
@@ -239,7 +251,8 @@ func TestCodexPlanUsesReadOnlySandboxForAudit(t *testing.T) {
 
 	plan, err := a.Plan(ctx, inst, worker.RunRequest{
 		RunID: "run_1", WorkDir: "/tmp/ws", Prompt: "проверь репозиторий",
-		AuditOnly: true, OutputDir: "/tmp/out", ReportSchemaPath: "/tmp/schema.json",
+		AuditOnly: true, OutputDir: "/tmp/out", ScratchDir: "/tmp/scratch",
+		ReportSchemaPath: "/tmp/schema.json",
 	})
 	if err != nil {
 		t.Fatalf("план запуска: %v", err)
@@ -263,10 +276,23 @@ func TestCodexPlanUsesReadOnlySandboxForAudit(t *testing.T) {
 	if !plan.StructuredOutput {
 		t.Fatal("план не отмечен как дающий структурированный вывод")
 	}
+	// Рабочий каталог не должен попасть в список записываемых.
+	scratchWritable := false
+	for _, m := range plan.Sandbox.Mounts {
+		if m.Kind == worker.MountWritable && m.Dst == "/tmp/ws" {
+			t.Fatal("рабочий каталог отдан на запись при audit-only")
+		}
+		if m.Kind == worker.MountWritable && m.Dst == "/tmp/scratch" {
+			scratchWritable = true
+		}
+	}
+	if !scratchWritable {
+		t.Fatal("исполнителю не выдан писчий каталог: запуск не состоится")
+	}
 
 	// Тот же запуск без audit-only обязан использовать другой sandbox.
 	writePlan, err := a.Plan(ctx, inst, worker.RunRequest{
-		RunID: "run_2", WorkDir: "/tmp/ws", AuditOnly: false,
+		RunID: "run_2", WorkDir: "/tmp/ws", ScratchDir: "/tmp/scratch", AuditOnly: false,
 	})
 	if err != nil {
 		t.Fatalf("план записи: %v", err)
