@@ -99,6 +99,7 @@ async function loadState() {
             ? (s.workspace_roots || []).map(esc).join("<br>")
             : `<span class="tag bad">не заданы</span> поручения будут отклоняться`
         }</td></tr>
+        <tr><th>Политика стоимости</th><td>${esc(s.model_policy || "—")}</td></tr>
         <tr><th>Разговорный слой</th><td>${esc(s.conversation_status)}</td></tr>
         <tr><th>Событий в журнале</th><td>${esc(s.journal_head)}</td></tr>
         <tr><th>Активных запусков</th><td>${(s.active_runs || []).length}</td></tr>
@@ -324,6 +325,22 @@ async function loadWorkers() {
   }
 }
 
+// Класс исполнителя объясняется словами, а не жаргоном.
+const CLASS_LABEL = {
+  routine: "повседневный исполнитель",
+  specialist: "мастер по вызову",
+};
+
+function costTag(tier, charged) {
+  if (charged) return tag("списывала деньги", "bad");
+  switch (tier) {
+    case "free": return tag("бесплатно", "ok");
+    case "subscription": return tag("квота подписки", "warn");
+    case "paid": return tag("платно", "bad");
+    default: return tag("стоимость неизвестна", "");
+  }
+}
+
 function renderWorkers(items) {
   $("workers").innerHTML = items.length
     ? items.map((v) => {
@@ -331,10 +348,16 @@ function renderWorkers(items) {
         const caps = (v.capabilities || [])
           .filter((c) => c.evidence !== "declared")
           .map((c) => `${esc(c.capability)} <span class="muted">(${esc(c.evidence)})</span>`);
+        const models = v.models || [];
+        const free = models.filter((m) => m.cost_tier === "free" && !(m.verified_at && m.last_cost > 0));
+        const charged = models.filter((m) => m.verified_at && m.last_cost > 0);
+        const isSpecialist = v.worker.class === "specialist";
+
         return `
           <li class="card">
             <div class="row">
               <strong>${esc(v.worker.display_name)}</strong>
+              ${tag(CLASS_LABEL[v.worker.class] || v.worker.class, isSpecialist ? "warn" : "ok")}
               ${tag(a.status || "unknown")}
               ${v.availability_fresh ? "" : tag("снимок просрочен", "warn")}
               <span class="grow"></span>
@@ -350,17 +373,62 @@ function renderWorkers(items) {
             <div class="muted" style="margin-top:4px">
               ${a.quota_known ? "квота известна" : esc(a.quota_note || "состояние квоты неизвестно")}
             </div>
+
+            <div style="margin-top:10px">
+              <strong style="font-size:13px">Модели</strong>
+              ${
+                models.length
+                  ? `<div class="muted" style="margin-top:4px">
+                       всего ${models.length}, бесплатных ${free.length}
+                       ${charged.length ? `, со списаниями ${charged.length}` : ""}
+                       · каталог обновлён ${ago(v.worker.models_refreshed_at)}
+                     </div>
+                     <ul class="plain" style="margin-top:6px">${
+                       free.slice(0, 5).map((m) => `
+                         <li style="padding:4px 0">
+                           ${costTag(m.cost_tier, false)}
+                           <code style="font-size:12px">${esc(m.ref)}</code>
+                           ${v.worker.preferred_model === m.ref ? tag("выбрана вручную", "ok") : ""}
+                           <div class="muted">${esc(m.evidence || "")}</div>
+                         </li>`).join("")
+                     }${
+                       free.length > 5
+                         ? `<li class="muted" style="padding:4px 0">…и ещё ${free.length - 5} бесплатных</li>`
+                         : ""
+                     }${
+                       charged.map((m) => `
+                         <li style="padding:4px 0">
+                           ${costTag(m.cost_tier, true)}
+                           <code style="font-size:12px">${esc(m.ref)}</code>
+                           <div class="muted">${esc(m.evidence || "")}</div>
+                         </li>`).join("")
+                     }${
+                       free.length === 0 && charged.length === 0
+                         ? `<li class="muted" style="padding:4px 0">бесплатных моделей нет</li>`
+                         : ""
+                     }</ul>`
+                  : `<div class="muted" style="margin-top:4px">каталог моделей пуст</div>`
+              }
+            </div>
+
             ${
               caps.length
-                ? `<div style="margin-top:6px" class="muted">подтверждено: ${caps.join(", ")}</div>`
-                : `<div style="margin-top:6px" class="muted">подтверждённых возможностей нет</div>`
+                ? `<div style="margin-top:8px" class="muted">подтверждено: ${caps.join(", ")}</div>`
+                : `<div style="margin-top:8px" class="muted">подтверждённых возможностей нет</div>`
             }
-            <button class="ghost" style="margin-top:8px"
-              onclick="probe('${esc(v.worker.id)}')">Перепроверить</button>
+            <div class="row" style="margin-top:8px">
+              <button class="ghost" onclick="probe('${esc(v.worker.id)}')">Перепроверить</button>
+              <button class="ghost" onclick="refreshModels('${esc(v.worker.id)}')">Обновить модели</button>
+            </div>
           </li>`;
       }).join("")
     : `<li class="muted">исполнители не обнаружены</li>`;
 }
+
+window.refreshModels = async (id) => {
+  await api(`/api/v1/workers/${id}/models/refresh`, { method: "POST" });
+  loadWorkers();
+};
 
 window.probe = async (id) => {
   await api(`/api/v1/workers/${id}/probe`, { method: "POST" });
@@ -428,7 +496,10 @@ $("wo-create").addEventListener("click", async () => {
             <div class="row">
               ${c.blocked ? tag("не может взять", "bad") : tag(`оценка ${c.score.toFixed(1)}`, "ok")}
               <strong>${esc(c.view.worker.display_name)}</strong>
+              ${tag(CLASS_LABEL[c.view.worker.class] || c.view.worker.class,
+                    c.view.worker.class === "specialist" ? "warn" : "ok")}
             </div>
+            ${c.blocked ? "" : `<div>${costTag(c.model?.cost_tier, false)} <code style="font-size:12px">${esc(c.model?.ref || "")}</code></div>`}
             <div class="muted">${esc(c.blocked ? c.block_reason : (c.reasons || []).join("; "))}</div>
           </li>`).join("")}</ul>
       </div>`;
@@ -471,6 +542,10 @@ window.openOrder = async (id) => {
       <p class="muted">${esc(o.goal)}</p>
       <table>
         <tr><th>Выбор исполнителя</th><td>${esc(o.worker_rationale)}</td></tr>
+        <tr><th>Модель</th><td>
+          <code>${esc(o.model || "—")}</code> ${costTag(o.model_cost_tier, false)}
+          <div class="muted">${esc(o.model_rationale || "")}</div>
+        </td></tr>
         <tr><th>Рабочий каталог</th><td>${esc(o.workspace_root)}</td></tr>
         <tr><th>HEAD на момент запуска</th><td class="muted">${esc(o.workspace_git_head || "—")}</td></tr>
         <tr><th>Пакет контекста</th><td class="muted">${esc(o.context_pack_checksum || "не собран")}</td></tr>

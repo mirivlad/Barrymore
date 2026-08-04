@@ -55,6 +55,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/workers", s.listWorkers)
 	mux.HandleFunc("POST /api/v1/workers/discover", s.discoverWorkers)
 	mux.HandleFunc("POST /api/v1/workers/{id}/probe", s.probeWorker)
+	mux.HandleFunc("POST /api/v1/workers/{id}/models/refresh", s.refreshModels)
+	mux.HandleFunc("POST /api/v1/workers/{id}/model", s.setPreferredModel)
 
 	mux.HandleFunc("GET /api/v1/work-orders", s.listOrders)
 	mux.HandleFunc("POST /api/v1/work-orders", s.proposeOrder)
@@ -141,6 +143,7 @@ func (s *Server) systemState(w http.ResponseWriter, r *http.Request) {
 		"workspace_roots":     s.app.Policy.Roots(),
 		"startup_notes":       s.app.StartupNotes,
 		"conversation_status": "не настроен: разговорный слой ещё не реализован",
+		"model_policy":        s.app.Config.ModelPolicy.Describe(),
 		"expectation_kinds":   s.app.Runtime.Kinds().Names(),
 		"reflex_policies":     s.app.Runtime.Reflexes().IDs(),
 		"observed_at":         s.app.Clock.Now(),
@@ -410,6 +413,37 @@ func (s *Server) discoverWorkers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) probeWorker(w http.ResponseWriter, r *http.Request) {
 	v, err := s.app.Registry.Probe(r.Context(), r.PathValue("id"), event.Actor{Type: event.ActorPerson})
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+// refreshModels перечитывает каталог моделей исполнителя.
+func (s *Server) refreshModels(w http.ResponseWriter, r *http.Request) {
+	v, err := s.app.Registry.RefreshModels(r.Context(), r.PathValue("id"),
+		event.Actor{Type: event.ActorPerson})
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+// setPreferredModel фиксирует ручной выбор модели владельцем.
+func (s *Server) setPreferredModel(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Model string `json:"model"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if err := s.app.Registry.SetPreferredModel(r.Context(), r.PathValue("id"), body.Model); err != nil {
+		writeProblem(w, http.StatusBadRequest, "модель не выбрана", err.Error())
+		return
+	}
+	v, err := s.app.Registry.View(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeDomainError(w, err)
 		return
