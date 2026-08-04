@@ -238,7 +238,10 @@ func (s *Service) propose(ctx context.Context, req ProposeRequest) (Candidate, e
 		req.Sensitivity = "normal"
 	}
 	if req.Confidence == 0 {
-		req.Confidence = 0.5
+		// Модель не назвала уверенность. Подставлять середину нельзя: это
+		// выдало бы отсутствие оценки за оценку. Без неё запись не может
+		// быть автоматической.
+		req.Confidence = 0
 	}
 	if req.ProposedBy == "" {
 		req.ProposedBy = "barrymore"

@@ -149,11 +149,13 @@ func ResponseSchema() json.RawMessage {
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["type", "content", "reason"],
+        "required": ["type", "content", "reason", "sensitivity", "confidence"],
         "properties": {
           "type": {"type": "string", "enum": ["fact", "preference", "decision", "open_question", "known_failure"]},
           "content": {"type": "string"},
-          "reason": {"type": "string"}
+          "reason": {"type": "string"},
+          "sensitivity": {"type": "string", "enum": ["normal", "sensitive", "private"]},
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1}
         }
       }
     },
