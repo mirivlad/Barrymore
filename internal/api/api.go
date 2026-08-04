@@ -158,6 +158,7 @@ func (s *Server) systemState(w http.ResponseWriter, r *http.Request) {
 		"startup_notes":      s.app.StartupNotes,
 		"conversation":       s.app.Talk.ProviderStatus(ctx),
 		"model_policy":       s.app.Config.ModelPolicy.Describe(),
+		"memory_policy":      s.app.Memory.Policy().Describe(),
 		"expectation_kinds":  s.app.Runtime.Kinds().Names(),
 		"reflex_policies":    s.app.Runtime.Reflexes().IDs(),
 		"observed_at":        s.app.Clock.Now(),
