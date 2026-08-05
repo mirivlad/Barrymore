@@ -254,8 +254,9 @@ async function loadState() {
       ? items.map(({ discrepancy: x, attempts }) => `
           <li>
             <div class="row">
-              ${tag(x.severity)} ${tag(x.status)}
-              <strong>${esc(x.kind)}</strong>
+              ${tag(x.severity)} ${tag(x.status, null, SAY_DISCREPANCY)}
+              <strong>${esc(DISCREPANCY_LABEL[x.kind] || x.kind)}</strong>
+              ${techNote(`· ${esc(x.kind)}`)}
               <span class="grow"></span>
               <span class="muted">${esc(x.occurrences)}× · ${ago(x.last_seen)}</span>
             </div>
@@ -264,13 +265,25 @@ async function loadState() {
             </div>
             ${
               (attempts || []).length
-                ? `<div class="muted" style="margin-top:4px">попытки восстановления: ${
-                    attempts.map((a) => `${esc(a.policy_id)} #${a.attempt_no} → ${esc(a.outcome)}`).join("; ")
+                ? `<div class="muted" style="margin-top:4px">что Бэрримор пробовал: ${
+                    attempts.map((a) => esc(a.detail || `${a.policy_id} #${a.attempt_no}`)).join("; ")
                   }</div>`
                 : ""
             }
-            <button class="ghost" style="margin-top:6px"
-              onclick="ackDiscrepancy('${esc(x.id)}')">Принять к сведению</button>
+            ${
+              x.status === "escalated"
+                ? `<div class="muted" style="margin-top:4px">Восстановить самостоятельно
+                   не вышло, поэтому решение за вами.</div>`
+                : ""
+            }
+            <div class="row" style="margin-top:6px">
+              ${
+                x.subject_type === "worker_run"
+                  ? `<button class="ghost" onclick="openRunSubject('${esc(x.subject_id)}')">Открыть поручение</button>`
+                  : ""
+              }
+              <button class="ghost" onclick="ackDiscrepancy('${esc(x.id)}')">Принять к сведению</button>
+            </div>
           </li>`).join("")
       : `<li class="muted">расхождений нет</li>`;
   } catch (err) {
@@ -300,6 +313,38 @@ async function loadState() {
     $("approvals").innerHTML = `<li class="muted">${esc(err.message)}</li>`;
   }
 }
+
+// Расхождения названы тем, что случилось, а не именем вида в коде.
+const DISCREPANCY_LABEL = {
+  "worker_run.starts": "исполнитель не запустился",
+  "worker_run.signal": "исполнитель молчит",
+  "worker_run.no_writes": "изменения в каталоге, которого нельзя менять",
+  "worker_run.report": "отчёт не собран",
+  "worker_run.cost_policy": "появилось списание там, где его быть не должно",
+  "snapshot.fresh": "сведения устарели",
+  "local_model.serving": "локальная модель не отвечает",
+};
+
+// openRunSubject ведёт от расхождения к поручению, по которому оно возникло.
+//
+// Иначе владелец видит «исполнитель молчит» и не может ничего сделать, не зная,
+// о каком поручении речь.
+window.openRunSubject = async (runID) => {
+  try {
+    const d = await api("/api/v1/work-orders");
+    for (const o of d.items || []) {
+      const full = await api(`/api/v1/work-orders/${o.id}`);
+      if ((full.order.runs || []).some((r) => r.id === runID)) {
+        showTab("orders");
+        openOrder(o.id);
+        return;
+      }
+    }
+    alert("Поручение не найдено: возможно, оно уже завершено.");
+  } catch (err) {
+    alert(`Не вышло: ${err.message}`);
+  }
+};
 
 window.ackDiscrepancy = async (id) => {
   await api(`/api/v1/discrepancies/${id}/acknowledge`, {
