@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -417,5 +418,49 @@ func TestLivenessReportsDeadProcessWithUnit(t *testing.T) {
 	}
 	if !l.Certain {
 		t.Fatal("отсутствие процесса — уверенный вывод, а не предположение")
+	}
+}
+
+// Запуск исполнителя должен пережить перезапуск Бэрримора (сценарий H).
+//
+// Обещание было в документации и в сообщении при остановке, а на деле
+// `--die-with-parent` убивал песочницу вместе с управляющим процессом. Здесь
+// проверяется само устройство команды: со scope владельцем времени жизни
+// является systemd, без него — только Бэрримор, и тогда флаг нужен.
+func TestSandboxLifetimeMatchesItsOwner(t *testing.T) {
+	r, _ := newRunner(t, &recordingSink{})
+	caps := r.Capabilities()
+	if caps.Bwrap == "" {
+		t.Skip("bubblewrap недоступен")
+	}
+
+	a := &shAdapter{script: `echo '{"summary":"ок"}'`}
+	plan, _ := a.Plan(context.Background(), worker.Installation{}, worker.RunRequest{})
+	res, err := r.Start(context.Background(), runner.StartRequest{
+		RunID: "run_lifetime", Adapter: a, Plan: plan, RunDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("запуск: %v", err)
+	}
+
+	hasFlag := slices.Contains(res.Argv, "--die-with-parent")
+	if caps.SystemdRun != "" {
+		if hasFlag {
+			t.Fatal("под systemd-scope запуск не должен умирать вместе с Бэрримором: " +
+				"это ровно то, что обещано сценарием H")
+		}
+		if res.Profile.Supervision != "systemd-scope" {
+			t.Fatalf("супервизия %q", res.Profile.Supervision)
+		}
+	} else {
+		if !hasFlag {
+			t.Fatal("без systemd песочнице некому владеть: она обязана умирать " +
+				"вместе с Бэрримором, иначе останется жить бесконтрольно")
+		}
+		if !slices.ContainsFunc(res.Profile.Warnings, func(w string) bool {
+			return strings.Contains(w, "не переживёт перезапуск")
+		}) {
+			t.Fatalf("ограничение не названо владельцу: %v", res.Profile.Warnings)
+		}
 	}
 }

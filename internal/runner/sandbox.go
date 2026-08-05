@@ -73,6 +73,15 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 
 	inner := append([]string(nil), plan.Argv...)
 
+	// Кто владеет временем жизни запуска: systemd-scope или процесс Бэрримора.
+	//
+	// Со scope запуск переживает перезапуск Бэрримора — так и задумано
+	// (сценарий H): работа исполнителя не должна пропадать оттого, что
+	// управляющий процесс перезапустили. Без systemd такой владелец только
+	// один — сам Бэрримор, и тогда `--die-with-parent` необходим, иначе
+	// песочница останется жить бесконтрольно.
+	ownedByScope := caps.SystemdRun != "" && opts.UnitName != ""
+
 	if caps.Bwrap != "" {
 		bw := []string{
 			caps.Bwrap,
@@ -83,10 +92,14 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 			"--proc", "/proc",
 			"--dev", "/dev",
 			"--tmpfs", "/tmp",
-			// Процесс умирает вместе с супервизором и не может перехватить
-			// управляющий терминал.
-			"--die-with-parent",
+			// Процесс не может перехватить управляющий терминал.
 			"--new-session",
+		}
+		if !ownedByScope {
+			// Умирает вместе с Бэрримором: иначе за песочницей некому следить.
+			bw = append(bw, "--die-with-parent")
+			profile.Warnings = append(profile.Warnings,
+				"запуск не переживёт перезапуск Бэрримора: без systemd им некому владеть")
 		}
 		// Рабочий каталог монтируется первым и явно. Полагаться на то, что
 		// он «и так под ro-bind /», нельзя: каталог может лежать под /tmp,
