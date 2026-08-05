@@ -49,6 +49,15 @@ func (r *Registry) Register(a Adapter) error {
 	return nil
 }
 
+// Known сообщает, есть ли уже такой adapter.
+//
+// Нужно подключению незнакомых инструментов: изучать заново то, что уже
+// в штате, — пустая работа, а зарегистрировать второй раз всё равно нельзя.
+func (r *Registry) Known(id string) bool {
+	_, ok := r.adapters[id]
+	return ok
+}
+
 // Adapter возвращает adapter по идентификатору.
 func (r *Registry) Adapter(id string) (Adapter, bool) {
 	a, ok := r.adapters[id]

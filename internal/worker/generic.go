@@ -29,7 +29,39 @@ type Manifest struct {
 	SupportsAuditOnly    bool     `yaml:"supportsAuditOnly" json:"supports_audit_only"`
 	Class                string   `yaml:"class" json:"class"`
 	Notes                string   `yaml:"notes" json:"notes"`
+	// Run описывает неинтерактивный запуск. Пустой означает «обнаруживать
+	// умею, запускать нет» — так было у всех манифестов до ADR 0021.
+	Run RunSpec `yaml:"run" json:"run"`
 }
+
+// RunSpec — способ обращения с инструментом, выведенный из его собственной
+// справки (ADR 0021).
+//
+// Здесь нет строки команды: только имя исполняемого файла из PATH и список
+// аргументов, каждый из которых проверен по справке. Оболочка не участвует.
+type RunSpec struct {
+	// Args — аргументы запуска. Элемент "{prompt}" заменяется заданием.
+	Args []string `yaml:"args" json:"args,omitempty"`
+	// PromptVia — "argv" или "stdin".
+	PromptVia string `yaml:"promptVia" json:"prompt_via,omitempty"`
+	// AuditArgs добавляются, когда запуск только на чтение.
+	AuditArgs []string `yaml:"auditArgs" json:"audit_args,omitempty"`
+	// ModelFlag — флаг выбора модели, если инструмент его понимает.
+	ModelFlag string `yaml:"modelFlag" json:"model_flag,omitempty"`
+	Network   bool   `yaml:"network" json:"network,omitempty"`
+}
+
+// Runnable сообщает, достаточно ли манифеста для запуска.
+func (r RunSpec) Runnable() bool { return len(r.Args) > 0 }
+
+// PromptToken — место, куда подставляется задание.
+const PromptToken = "{prompt}"
+
+// ReportFile — обязательный артефакт запуска по манифесту.
+//
+// Инструмент, о котором известна одна справка, не обязан уметь писать отчёт
+// файлом. Отчётом становится всё, что он напечатал, — так же, как у hermes.
+const ReportFile = "last-message.txt"
 
 func orDefault(v, fallback string) string {
 	if v == "" {
@@ -72,6 +104,7 @@ func (a *ManifestAdapter) Descriptor() Descriptor {
 		DeclaredCapabilities: a.M.DeclaredCapabilities,
 		SupportsAuditOnly:    a.M.SupportsAuditOnly,
 		Class:                orDefault(a.M.Class, ClassRoutine),
+		Runnable:             a.M.Run.Runnable(),
 		Notes:                a.M.Notes,
 	}
 }
@@ -153,22 +186,101 @@ func (a *ManifestAdapter) Availability(ctx context.Context, inst Installation) (
 		return Availability{
 			Status: StatusUnknown, Confidence: 0.4, ObservedAt: now,
 			ValidUntil: &validUntil, Source: "version-probe",
-			Reason:     "версия получена, но adapter не умеет запускать поручения",
+			Reason:     availabilityReason(a.M.Run.Runnable()),
 			QuotaKnown: false,
 			QuotaNote:  "состояние квоты не проверялось",
 		}, nil
 	}
 }
 
-// Plan отказывает: манифеста недостаточно для запуска.
-func (a *ManifestAdapter) Plan(context.Context, Installation, RunRequest) (RunPlan, error) {
-	return RunPlan{}, fmt.Errorf(
-		"adapter %q обнаруживает исполнителя, но не умеет готовить запуск; "+
-			"нужен полноценный adapter с планом команды и разбором событий", a.M.ID)
+func availabilityReason(runnable bool) string {
+	if runnable {
+		return "версия получена; способ запуска взят из справки инструмента " +
+			"и работой пока не подтверждён"
+	}
+	return "версия получена, но adapter не умеет запускать поручения"
 }
 
-// Collect ничего не делает: adapter не умеет запускать поручения.
-func (a *ManifestAdapter) Collect(context.Context, string) error { return nil }
+// Plan строит запуск по манифесту.
+//
+// Манифеста без раздела `run` для запуска недостаточно, и это честный отказ,
+// а не подделка: adapter без плана команды — найденный, но неподключённый
+// исполнитель.
+func (a *ManifestAdapter) Plan(_ context.Context, inst Installation, req RunRequest) (RunPlan, error) {
+	if !a.M.Run.Runnable() {
+		return RunPlan{}, fmt.Errorf(
+			"adapter %q обнаруживает исполнителя, но не умеет готовить запуск; "+
+				"нужен способ неинтерактивного запуска", a.M.ID)
+	}
+	if inst.ExecutablePath == "" {
+		return RunPlan{}, fmt.Errorf("%s: не найден исполняемый файл", a.M.ID)
+	}
+	if req.WorkDir == "" || req.ScratchDir == "" {
+		return RunPlan{}, fmt.Errorf("%s: не заданы каталоги запуска", a.M.ID)
+	}
+	if req.AuditOnly && !a.M.SupportsAuditOnly {
+		return RunPlan{}, fmt.Errorf(
+			"%s: собственного режима только для чтения не объявлено", a.M.ID)
+	}
+
+	argv := []string{inst.ExecutablePath}
+	for _, arg := range a.M.Run.Args {
+		if arg == PromptToken {
+			argv = append(argv, req.Prompt)
+			continue
+		}
+		argv = append(argv, arg)
+	}
+	if req.AuditOnly {
+		argv = append(argv, a.M.Run.AuditArgs...)
+	}
+	if req.Model != "" && a.M.Run.ModelFlag != "" {
+		argv = append(argv, a.M.Run.ModelFlag, req.Model)
+	}
+
+	plan := RunPlan{
+		Argv: argv,
+		Env: []string{
+			"TERM=dumb", "NO_COLOR=1",
+			"XDG_CACHE_HOME=" + req.ScratchDir,
+			"XDG_STATE_HOME=" + req.ScratchDir,
+		},
+		Sandbox: Sandbox{Network: a.M.Run.Network}.Writable(req.ScratchDir, req.ScratchDir),
+		Dir:     req.WorkDir,
+	}
+	if a.M.Run.PromptVia == "stdin" {
+		plan.Stdin = req.Prompt
+	}
+	if req.OutputDir != "" {
+		plan.Sandbox = plan.Sandbox.Writable(req.OutputDir, req.OutputDir)
+	}
+	return plan, nil
+}
+
+// Collect делает вывод пригодным для приёмки.
+//
+// Инструмент, известный по одной справке, отчёта файлом писать не обязан:
+// отчётом становится весь напечатанный текст.
+func (a *ManifestAdapter) Collect(_ context.Context, runDir string) error {
+	if !a.M.Run.Runnable() {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(runDir, "stdout.jsonl"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("%s: чтение вывода: %w", a.M.ID, err)
+	}
+	dst := filepath.Join(runDir, "out", ReportFile)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return fmt.Errorf("%s: каталог артефактов: %w", a.M.ID, err)
+	}
+	if err := os.WriteFile(dst, data, 0o600); err != nil {
+		return fmt.Errorf("%s: запись отчёта: %w", a.M.ID, err)
+	}
+	return nil
+}
 
 // Models не перечисляет модели: манифест этого не описывает.
 func (a *ManifestAdapter) Models(context.Context, Installation) ([]Model, error) {

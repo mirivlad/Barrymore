@@ -16,6 +16,7 @@ import (
 	"github.com/mirivlad/barrymore/internal/conversation"
 	"github.com/mirivlad/barrymore/internal/delegation"
 	"github.com/mirivlad/barrymore/internal/event"
+	"github.com/mirivlad/barrymore/internal/harness"
 	"github.com/mirivlad/barrymore/internal/initiative"
 	"github.com/mirivlad/barrymore/internal/learning"
 	"github.com/mirivlad/barrymore/internal/localmodel"
@@ -84,6 +85,7 @@ type App struct {
 	Talk       *conversation.Service
 	Skills     *skill.Service
 	Learning   *learning.Service
+	Harness    *harness.Service
 	LocalModel *localmodel.Supervisor
 	Initiative *initiative.Service
 	Settings   *SettingsStore
@@ -242,6 +244,13 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		Skills: a.Skills, Practices: a.Learning, Identity: identity,
 	})
 
+	// Подключение незнакомых инструментов — тоже разговорный слой: без модели
+	// справку разобрать нечем, и это честно сказано в отказе.
+	a.Harness = harness.New(harness.Config{
+		Provider: provider, Journal: a.Journal, Clock: cfg.Clock,
+		Registry: a.Registry, Logger: cfg.Logger,
+	})
+
 	a.Initiative = initiative.NewService(db, a.Journal, cfg.Clock,
 		cfg.InitiativePolicy, cfg.Logger)
 	a.Initiative.AddSource(workSource{app: a})
@@ -255,6 +264,9 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	a.Talk.Projections(a.Projector)
 	a.Skills.Projections(a.Projector)
 	a.Learning.Projections(a.Projector)
+	// События подключения — аудиторские: штат ведёт собственные проекции,
+	// и вторая запись о том же исполнителе только расходилась бы с первой.
+	a.Projector.OnAudit(harness.EvSurveyed, harness.EvAdopted, harness.EvRefused)
 	a.Initiative.Projections(a.Projector)
 
 	a.collectStartupNotes()

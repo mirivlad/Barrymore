@@ -110,6 +110,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/skills/{id}/retire", s.retireSkill)
 	mux.HandleFunc("POST /api/v1/skills/learn", s.learnSkill)
 
+	mux.HandleFunc("POST /api/v1/harness/study", s.studyHarness)
+	mux.HandleFunc("POST /api/v1/harness/adopt", s.adoptHarness)
+
 	mux.HandleFunc("GET /api/v1/notices", s.listNotices)
 	mux.HandleFunc("POST /api/v1/notices/{id}/read", s.readNotice)
 	mux.HandleFunc("POST /api/v1/notices/mute", s.muteNotices)

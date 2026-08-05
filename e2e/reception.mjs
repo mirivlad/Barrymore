@@ -96,6 +96,31 @@ async function main() {
   await mkdir(workspace, { recursive: true });
   await writeFile(path.join(workspace, "README.md"), "тестовый репозиторий\n");
 
+  // Незнакомый инструмент — настоящая программа в PATH, а не подделка вывода.
+  // Проверяется в том числе то, что Бэрримор действительно её запускает
+  // и читает напечатанное ею.
+  const toolBin = path.join(dataRoot, "bin");
+  await mkdir(toolBin, { recursive: true });
+  await writeFile(path.join(toolBin, "crush"), `#!/bin/sh
+case "$1" in
+  --version) echo 'crush 1.4.2' ;;
+  *) cat <<'EOF'
+crush — агент для работы с кодом
+
+Использование:
+  crush run [флаги] <задание>
+
+Флаги:
+  --version        показать версию
+  -h, --help       показать эту справку
+  -q, --quiet      не печатать ничего лишнего
+  --read-only      ничего не менять на диске
+  --model строка   какую модель использовать
+EOF
+  ;;
+esac
+`, { mode: 0o755 });
+
   launch("node", ["e2e/fake-provider.mjs"], {
     E2E_PROVIDER_PORT: String(PROVIDER_PORT),
     E2E_WORKSPACE: workspace,
@@ -107,7 +132,7 @@ async function main() {
     "-provider", `http://127.0.0.1:${PROVIDER_PORT}`,
     "-provider-model", "e2e",
     "-tick", "2s",
-  ], { TZ: daylightTZ() });
+  ], { TZ: daylightTZ(), PATH: `${toolBin}:${process.env.PATH}` });
 
   await waitFor("сервер поднялся", async () => {
     try {
@@ -494,9 +519,14 @@ async function main() {
   });
 
   await check("владельцу сказано, что разговор отнесён к нити", async () => {
+    // Связь — не решение, а перемена: она лежит в «Изменилось», и сайдбар
+    // ради неё сам не раскрывается.
+    if (!(await page.locator("#affairs").isVisible())) {
+      await page.locator("#affairs-toggle").click();
+    }
     const text = await page.locator("#affairs").innerText();
     if (!text.includes("Отнёс разговор к нити")) {
-      throw new Error("связь сделана молча — владелец не узнает, что произошло");
+      throw new Error(`связь сделана молча: ${text.slice(0, 200)}`);
     }
   });
 
@@ -549,6 +579,36 @@ async function main() {
   await check("разговор по-прежнему в центре", async () => {
     await chatIsCentral("после перезагрузки");
     await centreIsClean("после перезагрузки");
+  });
+
+  console.log("Незнакомый инструмент:");
+
+  await check("Бэрримор изучает его сам, по одному имени команды", async () => {
+    await page.locator("nav button[data-tab='staff']").click();
+    await page.locator("#harness-name").fill("crush");
+    await page.getByRole("button", { name: "Изучить" }).click();
+    await page.locator("#harness-result").getByText("Принять в штат")
+      .waitFor({ timeout: 30000 });
+    const text = await page.locator("#harness-result").innerText();
+    if (!text.includes("crush run")) throw new Error(`способ запуска не выведен: ${text}`);
+    if (!text.includes("--read-only")) throw new Error("режим только чтения не найден в справке");
+    if (!text.includes("только чтение рабочего каталога")) {
+      throw new Error("новичку выдано доверие больше наименьшего");
+    }
+  });
+
+  await check("принятый в штат появляется среди исполнителей", async () => {
+    await page.getByRole("button", { name: "Принять в штат" }).click();
+    await waitFor("исполнитель в штате", async () => {
+      const d = await (await fetch(`${BASE}/api/v1/workers`)).json();
+      return (d.items || []).some((v) => (v.worker ?? v).adapter_id === "crush");
+    });
+    const d = await (await fetch(`${BASE}/api/v1/workers`)).json();
+    const w = (d.items || []).map((v) => v.worker ?? v).find((x) => x.adapter_id === "crush");
+    if (w.trust_level !== "workspace_read") {
+      throw new Error(`новичку выдано доверие «${w.trust_level}»`);
+    }
+    if (!w.version) throw new Error("версия не опрошена");
   });
 
   await check("страница не ругалась в консоль", async () => {

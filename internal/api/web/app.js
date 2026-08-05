@@ -717,6 +717,94 @@ async function loadWorkers() {
   loadSkills();
 }
 
+// ---------- подключение незнакомого инструмента ----------
+//
+// Владелец называет команду — и это единственное, что он делает. Дальше
+// показывается не форма для заполнения, а готовое предложение: что за
+// инструмент, как его запускать, на каких строках справки это основано.
+let harnessDraft = null;
+
+$("harness-study").addEventListener("click", async () => {
+  const name = $("harness-name").value.trim();
+  const box = $("harness-result");
+  if (!name) {
+    $("harness-name").focus();
+    return;
+  }
+  box.innerHTML = `<p class="muted" style="margin-top:10px">Смотрю, что это за ${esc(name)}…</p>`;
+  try {
+    const d = await api("/api/v1/harness/study", {
+      method: "POST", body: JSON.stringify({ name }),
+    });
+    harnessDraft = d.draft;
+    renderHarness(d.survey, d.draft);
+  } catch (err) {
+    harnessDraft = null;
+    box.innerHTML = `<div class="notes" style="margin-top:10px">${esc(err.message)}</div>`;
+  }
+});
+
+function renderHarness(survey, draft) {
+  const box = $("harness-result");
+  if (draft.refused) {
+    // Отказ показывается целиком: владелец должен видеть, что именно Бэрримор
+    // отверг и почему, а не только что «не вышло».
+    box.innerHTML = `
+      <div class="notes" style="margin-top:12px">
+        <div><strong>Подключать не стану.</strong> ${esc(draft.refused)}</div>
+        <div class="muted" style="margin-top:6px">Я принимаю только то, что
+          инструмент напечатал о себе сам.</div>
+      </div>`;
+    return;
+  }
+  box.innerHTML = `
+    <div class="card" style="margin-top:12px">
+      <div class="row">
+        <strong>${esc(draft.display_name)}</strong>
+        ${survey.version ? tag(survey.version) : ""}
+        ${draft.audit_args?.length ? tag("умеет только читать", "ok") : tag("режима только чтения нет", "warn")}
+      </div>
+      <div class="muted" style="margin-top:6px">${esc(draft.why)}</div>
+      <dl class="kv" style="margin-top:10px">
+        <dt>запуск</dt><dd><code>${esc([survey.name, ...(draft.run_args || [])].join(" "))}</code></dd>
+        ${
+          draft.audit_args?.length
+            ? `<dt>только чтение</dt><dd><code>${esc(draft.audit_args.join(" "))}</code></dd>`
+            : ""
+        }
+        <dt>доверие</dt><dd>только чтение рабочего каталога — большего
+          новичку я не дам</dd>
+        <dt>на чём основано</dt><dd>${
+          (draft.evidence || []).map(esc).join("<br>") || "—"
+        }</dd>
+      </dl>
+      <div class="row" style="margin-top:10px">
+        <button class="act" id="harness-adopt">Принять в штат</button>
+        <span class="muted">возможности заявлены справкой, а не проверены работой</span>
+      </div>
+      ${techNote(`<pre>${esc(survey.help || "")}</pre>`)}
+    </div>`;
+  $("harness-adopt").addEventListener("click", adoptHarness);
+}
+
+async function adoptHarness() {
+  if (!harnessDraft) return;
+  try {
+    await api("/api/v1/harness/adopt", {
+      method: "POST", body: JSON.stringify({ draft: harnessDraft }),
+    });
+    $("harness-result").innerHTML =
+      `<p class="muted" style="margin-top:12px">Принял. Он появился в штате ниже —
+       и пока с наименьшим доверием.</p>`;
+    harnessDraft = null;
+    $("harness-name").value = "";
+    loadWorkers();
+  } catch (err) {
+    $("harness-result").insertAdjacentHTML("beforeend",
+      `<div class="notes" style="margin-top:10px">${esc(err.message)}</div>`);
+  }
+}
+
 // practiceWords переводит запись опыта в строку, которую можно прочитать.
 //
 // Она же уходит в контекст модели: владелец и Бэрримор смотрят на один и тот
