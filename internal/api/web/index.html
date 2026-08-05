@@ -18,11 +18,17 @@
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
-    font: 15px/1.55 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    font: 15px/1.6 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    /* Числа не должны прыгать при обновлении: время, счётчики и размеры
+       меняются каждые несколько секунд, и дрожащая строка утомляет. */
+    font-variant-numeric: tabular-nums;
   }
   header {
     padding: 14px 20px; border-bottom: 1px solid var(--line);
     display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+    position: sticky; top: 0; z-index: 2;
+    background: var(--bg);
   }
   h1 { font-size: 17px; margin: 0; font-weight: 600; letter-spacing: .02em; }
   h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; color: var(--accent); }
@@ -33,7 +39,18 @@
   }
   nav button:hover { color: var(--ink); }
   nav button[aria-current="true"] { color: var(--ink); border-color: var(--line); background: var(--panel); }
-  main { padding: 20px; max-width: 1100px; }
+  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
+
+  /* Видимый фокус обязателен: клавиатурой пользуются не от хорошей жизни,
+     и потерять курсор на странице с кнопкой «Разрешить» опасно. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: .01ms !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
+  }
   section[hidden] { display: none; }
   .card {
     background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
@@ -125,6 +142,21 @@
   .welcome { border-left: 3px solid var(--accent); padding-left: 14px; }
   .welcome ol { margin: 8px 0 0; padding-left: 20px; }
   .welcome li { margin-bottom: 4px; }
+
+  details > summary { cursor: pointer; }
+  details[open] > summary { margin-bottom: 6px; }
+
+  /* На узком экране разговор — главное, поэтому ему отдаётся больше высоты,
+     а вкладки перестают занимать две строки шапки. */
+  @media (max-width: 600px) {
+    header { padding: 10px 14px; gap: 10px; }
+    main { padding: 14px; }
+    nav { order: 3; width: 100%; }
+    nav button { padding: 5px 9px; font-size: 14px; }
+    .chat { max-height: 60vh; }
+    .bubble { max-width: 96%; }
+    .card { padding: 12px 13px; }
+  }
 </style>
 </head>
 <body>
