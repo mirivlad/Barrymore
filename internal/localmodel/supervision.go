@@ -39,7 +39,7 @@ func (s *Supervisor) restartAction(ctx context.Context, in runtime.ReflexInput) 
 		}, nil
 	}
 
-	st, err := s.Ensure(ctx)
+	st, err := s.EnsureStarted(ctx)
 	obs := []runtime.ObservationRequest{{
 		Kind:          runtime.ObsLocalModel,
 		SubjectType:   runtime.SubjectProvider,
@@ -61,19 +61,32 @@ func (s *Supervisor) restartAction(ctx context.Context, in runtime.ReflexInput) 
 			Observations: obs,
 		}, nil
 	}
-	if !st.Serving {
+	switch {
+	case st.Serving:
+		return runtime.ReflexOutcome{
+			Succeeded:    true,
+			Detail:       "локальная модель поднята и отвечает на " + st.Endpoint,
+			Resolution:   "сервер модели перезапущен локальной реакцией, вмешательство не потребовалось",
+			Observations: obs,
+		}, nil
+	case st.Loading:
+		// Процесс поднят и грузит веса. Это наблюдение, а не обещание: реакция
+		// сделала своё, готовность подтвердит следующее наблюдение. Ждать её
+		// здесь нельзя — реакция выполняется внутри тика предиктивного контура.
+		return runtime.ReflexOutcome{
+			Succeeded: true,
+			Detail:    "сервер модели запущен, идёт загрузка весов",
+			Resolution: "сервер модели перезапущен локальной реакцией; " +
+				"модель грузится, готовность подтвердится наблюдением",
+			Observations: obs,
+		}, nil
+	default:
 		return runtime.ReflexOutcome{
 			Succeeded:    false,
 			Detail:       "модель всё ещё не отвечает: " + st.Reason,
 			Observations: obs,
 		}, nil
 	}
-	return runtime.ReflexOutcome{
-		Succeeded:    true,
-		Detail:       "локальная модель поднята и отвечает на " + st.Endpoint,
-		Resolution:   "сервер модели перезапущен локальной реакцией, вмешательство не потребовалось",
-		Observations: obs,
-	}, nil
 }
 
 // EnsureExpectation создаёт стоячее ожидание, если открытого ещё нет.

@@ -515,11 +515,35 @@ func (s *Supervisor) look(ctx context.Context) State {
 	return st
 }
 
-// Ensure добивается того, чтобы модель обслуживала запросы.
+// Ensure добивается того, чтобы модель обслуживала запросы, и ждёт готовности.
 //
-// Возвращает состояние на момент окончания ожидания. Загрузка больших весов
-// занимает минуты, поэтому вызывать это синхронно на пути запроса нельзя.
+// Загрузка больших весов занимает минуты, поэтому вызывать это синхронно
+// на пути запроса нельзя — только из отдельной горутины.
 func (s *Supervisor) Ensure(ctx context.Context) (State, error) {
+	return s.ensure(ctx, s.Spec().LoadTimeout)
+}
+
+// EnsureStarted поднимает модель, но ждёт лишь столько, чтобы отличить
+// неудачный запуск от начавшейся загрузки.
+//
+// Нужен там, где ждать нельзя. Локальные реакции выполняются внутри тика
+// предиктивного контура: реакция, ждущая готовности 22 ГБ весов, остановила бы
+// весь контур на минуты — и Бэрримор перестал бы замечать всё остальное.
+func (s *Supervisor) EnsureStarted(ctx context.Context) (State, error) {
+	wait := briefWait
+	// Ждать дольше отведённого на загрузку бессмысленно: это уже не «отличить
+	// неудачу от начала загрузки», а полное ожидание под другим именем.
+	if lt := s.Spec().LoadTimeout; lt > 0 && lt < wait {
+		wait = lt
+	}
+	return s.ensure(ctx, wait)
+}
+
+// briefWait — сколько ждать, когда ждать нельзя: достаточно, чтобы упавший
+// сразу процесс успел упасть, и мало, чтобы не задержать наблюдение.
+const briefWait = 15 * time.Second
+
+func (s *Supervisor) ensure(ctx context.Context, wait time.Duration) (State, error) {
 	// Одновременных запусков быть не должно: два llama-server на одном порту
 	// дали бы непредсказуемое поведение вместо честной ошибки.
 	s.startMu.Lock()
@@ -530,7 +554,7 @@ func (s *Supervisor) Ensure(ctx context.Context) (State, error) {
 		return st, err
 	}
 	if st.Serving || st.Loading {
-		return s.awaitReady(ctx, st)
+		return s.awaitReady(ctx, st, wait)
 	}
 	if !s.Enabled() {
 		return st, nil
@@ -542,17 +566,30 @@ func (s *Supervisor) Ensure(ctx context.Context) (State, error) {
 	if err != nil {
 		return st, err
 	}
-	return s.awaitReady(ctx, st)
+	return s.awaitReady(ctx, st, wait)
 }
 
 // awaitReady ждёт готовности, пока процесс жив и время не вышло.
-func (s *Supervisor) awaitReady(ctx context.Context, st State) (State, error) {
+//
+// Истечение отведённого времени при живом процессе ошибкой не считается:
+// загрузка продолжается, и следующее наблюдение её увидит. Ошибка — это
+// когда процесса не стало.
+func (s *Supervisor) awaitReady(ctx context.Context, st State, wait time.Duration) (State, error) {
 	if st.Serving {
 		return st, nil
 	}
-	loadTimeout := s.Spec().LoadTimeout
-	deadline := s.now().Add(loadTimeout)
-	ticker := time.NewTicker(3 * time.Second)
+	// Здесь намеренно настоящие часы, а не Clock: это ожидание внешнего
+	// процесса, а не оценка домена. Срок по подставным часам и опрос по
+	// настоящим не сходились бы никогда — цикл висел бы вечно.
+	deadline := time.Now().Add(wait)
+	every := wait / 4
+	if every > 3*time.Second {
+		every = 3 * time.Second
+	}
+	if every < 200*time.Millisecond {
+		every = 200 * time.Millisecond
+	}
+	ticker := time.NewTicker(every)
 	defer ticker.Stop()
 	for {
 		select {
@@ -571,10 +608,8 @@ func (s *Supervisor) awaitReady(ctx context.Context, st State) (State, error) {
 		if !st.Loading {
 			return st, fmt.Errorf("сервер модели не поднялся: %s", st.Reason)
 		}
-		if !s.now().Before(deadline) {
-			return st, fmt.Errorf(
-				"модель не ответила за %s; процесс жив, вывод сервера в %s",
-				loadTimeout, s.LogPath())
+		if !time.Now().Before(deadline) {
+			return st, nil
 		}
 	}
 }

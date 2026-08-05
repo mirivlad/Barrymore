@@ -296,3 +296,29 @@ func TestExpectationExistsWithoutAbilityToStart(t *testing.T) {
 		t.Fatalf("основание умалчивает об ограничении: %q", exps[0].Basis)
 	}
 }
+
+// Локальные реакции выполняются внутри тика предиктивного контура. Реакция,
+// ждущая загрузки 22 ГБ весов, остановила бы весь контур на минуты — и
+// Бэрримор перестал бы замечать всё остальное.
+func TestEnsureStartedDoesNotWaitOutTheLoad(t *testing.T) {
+	h := newHarness(t, localmodel.Spec{
+		ModelPath: gguf(t), Port: 18080, LoadTimeout: 2 * time.Second,
+	})
+	// Живой процесс, который не отвечает: ровно та ситуация, в которой
+	// полное ожидание затянулось бы на час.
+	writeIdentity(t, h.dir, os.Getpid())
+
+	started := time.Now()
+	st, err := h.sup.EnsureStarted(context.Background())
+	elapsed := time.Since(started)
+
+	if err != nil {
+		t.Fatalf("загрузка не должна быть ошибкой: %v", err)
+	}
+	if !st.Loading {
+		t.Fatalf("живой процесс без ответа — это загрузка: %+v", st)
+	}
+	if elapsed > 30*time.Second {
+		t.Fatalf("реакция держала контур %s: это остановило бы всё наблюдение", elapsed)
+	}
+}

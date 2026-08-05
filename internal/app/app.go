@@ -340,6 +340,11 @@ func (a *App) ensureLocalModel(ctx context.Context) {
 	case st.Serving:
 		a.Log.Info("локальная модель отвечает", "endpoint", st.Endpoint,
 			"поднята_бэрримором", st.Managed)
+	case st.Loading:
+		// Отведённое время вышло, а веса всё грузятся. Это не отказ, но и не
+		// повод молчать: владелец должен знать, почему разговор недоступен.
+		a.Log.Warn("локальная модель всё ещё грузится", "endpoint", st.Endpoint,
+			"log", a.LocalModel.LogPath())
 	}
 }
 
