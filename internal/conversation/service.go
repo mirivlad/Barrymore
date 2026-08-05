@@ -17,6 +17,7 @@ import (
 	"github.com/mirivlad/barrymore/internal/model"
 	"github.com/mirivlad/barrymore/internal/projection"
 	"github.com/mirivlad/barrymore/internal/runtime"
+	"github.com/mirivlad/barrymore/internal/skill"
 	"github.com/mirivlad/barrymore/internal/store"
 	"github.com/mirivlad/barrymore/internal/thread"
 )
@@ -39,6 +40,7 @@ type Service struct {
 	threads  *thread.Service
 	memory   *memory.Service
 	rt       *runtime.Runtime
+	skills   SkillCatalog
 	identity Identity
 	log      *slog.Logger
 
@@ -57,6 +59,7 @@ type Config struct {
 	Threads    *thread.Service
 	Memory     *memory.Service
 	Runtime    *runtime.Runtime
+	Skills     SkillCatalog
 	Identity   Identity
 	Logger     *slog.Logger
 	MaxHistory int
@@ -80,9 +83,18 @@ func New(cfg Config) *Service {
 	return &Service{
 		db: cfg.DB, journal: cfg.Journal, clock: cfg.Clock, provider: cfg.Provider,
 		threads: cfg.Threads, memory: cfg.Memory, rt: cfg.Runtime,
-		identity: cfg.Identity, log: cfg.Logger,
+		skills: cfg.Skills, identity: cfg.Identity, log: cfg.Logger,
 		maxHistory: cfg.MaxHistory, maxTokens: cfg.MaxTokens,
 	}
+}
+
+// SkillCatalog перечисляет то, что Бэрримор умеет сам.
+//
+// Разговор берёт список отсюда и показывает его модели. Придуманное умение
+// runtime отвергает — граница полномочий совпадает с тем, что система
+// показала сама (тот же порядок, что и с нитями, ADR 0018).
+type SkillCatalog interface {
+	Live() []skill.Skill
 }
 
 // Available сообщает, доступен ли разговорный слой.
@@ -202,6 +214,11 @@ func (s *Service) Send(ctx context.Context, conversationID, text string) (Turn, 
 	// состояние принадлежат ей, и без неё им негде оказаться.
 	turn.Thread = s.settleThread(ctx, &conv, proposal, offered)
 
+	// Собственные умения проверяются по показанному списку — тем же правилом,
+	// что и нити. Придуманное умение не отбрасывается молча: владелец видит
+	// отказ и его причину.
+	turn.OwnActions = s.settleOwnActions(proposal.OwnActions)
+
 	// Предложения превращаются в видимых кандидатов. Ничего не записывается
 	// в память молча (00_PRODUCT_VISION §9.2).
 	for _, mc := range proposal.MemoryCandidates {
@@ -271,6 +288,61 @@ func (s *Service) Send(ctx context.Context, conversationID, text string) (Turn, 
 		return turn, err
 	}
 	return turn, nil
+}
+
+// Report записывает в разговор то, что Бэрримор сделал сам.
+//
+// Это не ответ модели: реплика появляется без единого обращения к провайдеру,
+// потому что смотреть Бэрримор умеет сам. Модель, пересказывающая увиденное,
+// добавила бы к факту только задержку и возможность его исказить.
+func (s *Service) Report(ctx context.Context, conversationID, text string) (Message, error) {
+	conv, err := s.Get(ctx, conversationID)
+	if err != nil {
+		return Message{}, err
+	}
+	return s.record(ctx, conv, Message{
+		ConversationID: conv.ID, ThreadID: conv.ThreadID,
+		Role: RoleBarrymore, Content: text,
+	}, event.Actor{Type: event.ActorBarrymore})
+}
+
+// settleOwnActions оставляет только те умения, которые Бэрримор действительно
+// умеет, и объясняет отказ по остальным.
+func (s *Service) settleOwnActions(props []OwnActionProposal) []OwnAction {
+	if len(props) == 0 {
+		return nil
+	}
+	live := map[string]skill.Skill{}
+	if s.skills != nil {
+		for _, sk := range s.skills.Live() {
+			live[sk.ID] = sk
+		}
+	}
+
+	var out []OwnAction
+	seen := map[string]bool{}
+	for _, p := range props {
+		id := strings.TrimSpace(p.SkillID)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		sk, ok := live[id]
+		if !ok {
+			s.log.Warn("предложено несуществующее умение", "skill", id)
+			out = append(out, OwnAction{
+				SkillID: id,
+				Refused: fmt.Sprintf("умения %q у меня нет — я могу только то, "+
+					"что перечислено в разделе умений", id),
+			})
+			continue
+		}
+		out = append(out, OwnAction{
+			SkillID: sk.ID, Title: sk.Title, Question: sk.Question,
+			Target: strings.TrimSpace(p.Target), Why: strings.TrimSpace(p.Why),
+		})
+	}
+	return out
 }
 
 // parseProposal разбирает ответ модели.
@@ -466,6 +538,26 @@ func (s *Service) buildContext(ctx context.Context, conv Conversation) (
 			Title: "Нити, которые уже есть", Body: b.String(),
 		})
 		trace = append(trace, fmt.Sprintf("нитей предложено к сопоставлению: %d", len(open)))
+	}
+
+	// Собственные умения показываются наравне с нитями и по той же причине:
+	// выбрать можно только из показанного. Без этого раздела Бэрримор не знает,
+	// что способен посмотреть сам, и зовёт исполнителя даже за `git worktree list`.
+	if s.skills != nil {
+		live := s.skills.Live()
+		var b strings.Builder
+		for _, sk := range live {
+			b.WriteString("- " + sk.ID + " — " + sk.Title + "; отвечает на вопрос: " + sk.Question)
+			if sk.NeedsTarget {
+				b.WriteString("; нужен каталог")
+			}
+			b.WriteString("\n")
+		}
+		if len(live) == 0 {
+			b.WriteString("Умений пока нет: всё, что нужно сделать, придётся поручать.\n")
+		}
+		sections = append(sections, ContextSection{Title: "Что ты умеешь сам", Body: b.String()})
+		trace = append(trace, fmt.Sprintf("собственных умений предложено: %d", len(live)))
 	}
 
 	items, err := s.memory.Active(ctx, 40)

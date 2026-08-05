@@ -34,6 +34,7 @@ const (
 	Approval      = "apr"
 	Correlation   = "corr"
 	Message       = "msg"
+	SkillRun      = "act"
 )
 
 var enc = base32.NewEncoding("0123456789abcdefghjkmnpqrstvwxyz").WithPadding(base32.NoPadding)

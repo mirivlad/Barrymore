@@ -57,7 +57,20 @@ type Proposal struct {
 	ThreadPosition   *PositionProposal   `json:"thread_position,omitempty"`
 	MemoryCandidates []MemoryProposal    `json:"memory_candidates"`
 	WorkOrders       []WorkOrderProposal `json:"work_order_proposals"`
-	OpenQuestions    []string            `json:"open_questions"`
+	// OwnActions — то, что Бэрримор берётся сделать сам.
+	OwnActions    []OwnActionProposal `json:"own_actions"`
+	OpenQuestions []string            `json:"open_questions"`
+}
+
+// OwnActionProposal — предложение применить собственное умение.
+//
+// ADR 0019: умение выбирается из показанного списка, каталог проверяется
+// политикой. Ни команды, ни аргументов сверх каталога модель не задаёт —
+// шаги умения заданы самим умением.
+type OwnActionProposal struct {
+	SkillID string `json:"skill_id"`
+	Target  string `json:"target"`
+	Why     string `json:"why"`
 }
 
 // ThreadMatch — к какой нити Бэрримор относит разговор.
@@ -136,6 +149,23 @@ type Turn struct {
 	MemoryCandidates []MemoryCandidateID `json:"memory_candidates"`
 	// Thread сообщает, что стало с нитью разговора на этом ходу.
 	Thread ThreadOutcome `json:"thread"`
+	// OwnActions — умения, которые Бэрримор готов применить прямо сейчас.
+	OwnActions []OwnAction `json:"own_actions,omitempty"`
+}
+
+// OwnAction — проверенное предложение применить умение.
+//
+// Проверенное значит: умение существует и применимо, а каталог назван.
+// Придуманное умение сюда не попадает — вместо него владелец видит отказ
+// с объяснением, как и в случае с выдуманной нитью.
+type OwnAction struct {
+	SkillID  string `json:"skill_id"`
+	Title    string `json:"title"`
+	Question string `json:"question"`
+	Target   string `json:"target,omitempty"`
+	Why      string `json:"why,omitempty"`
+	// Refused объясняет, почему предложение не принято.
+	Refused string `json:"refused,omitempty"`
 }
 
 // ThreadOutcome — судьба нити после хода.
@@ -224,7 +254,7 @@ func ResponseSchema() json.RawMessage {
   "type": "object",
   "additionalProperties": false,
   "required": ["reply", "thread_match", "thread_state", "memory_candidates",
-               "work_order_proposals", "open_questions"],
+               "own_actions", "work_order_proposals", "open_questions"],
   "properties": {
     "reply": {
       "type": "string",
@@ -284,6 +314,20 @@ func ResponseSchema() json.RawMessage {
           "reason": {"type": "string"},
           "sensitivity": {"type": "string", "enum": ["normal", "sensitive", "private"]},
           "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "own_actions": {
+      "type": "array",
+      "description": "Что ты можешь посмотреть сам, не зовя исполнителя. Если умение отвечает на вопрос владельца — оно здесь, а work_order_proposals остаётся пустым.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["skill_id", "target", "why"],
+        "properties": {
+          "skill_id": {"type": "string", "description": "Идентификатор умения из раздела «Что ты умеешь сам». Придумывать нельзя."},
+          "target": {"type": "string", "description": "Абсолютный путь к каталогу, если умение его требует. Иначе пустая строка."},
+          "why": {"type": "string", "description": "Почему это стоит посмотреть сейчас."}
         }
       }
     },

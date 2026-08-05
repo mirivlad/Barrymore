@@ -34,13 +34,42 @@ const reply = {
       needs_write: false,
     },
   ],
+  own_actions: [],
   open_questions: ["что именно означает «завис»?"],
+};
+
+// Ответ, в котором Бэрримор берётся посмотреть сам.
+//
+// Умение берётся из того же списка, который runtime показал в промпте, —
+// иначе оно было бы отвергнуто, и это тоже часть проверяемого контракта.
+const ownReply = {
+  reply: "Это я посмотрю сам, звать никого не нужно.",
+  thread_match: { thread_id: "", new_thread_title: "", new_thread_kind: "", why: "" },
+  thread_state: { goal: "", situation: "", next_step: "", obstacles: [], waiting: [] },
+  memory_candidates: [],
+  own_actions: [
+    {
+      skill_id: "git.worktree.diagnose",
+      target: process.env.E2E_WORKSPACE || "",
+      why: "вопрос ровно о том, что я вижу своими средствами",
+    },
+  ],
+  work_order_proposals: [],
+  open_questions: [],
 };
 
 // Идентификатор нити берётся из того же списка, который Бэрримор показал
 // в промпте. Так и работает настоящая модель, и так проверяется вторая ветка
 // сопоставления: не «предложить новую», а «узнать уже существующую».
 function replyFor(prompt) {
+  // Реплика «посмотри сам» проверяет вторую ветку выбора способа: не звать
+  // исполнителя, когда на вопрос отвечает собственное умение.
+  if (/посмотри сам/i.test(prompt || "")) {
+    const offered = /git\.worktree\.diagnose/.test(prompt || "");
+    return offered
+      ? ownReply
+      : { ...ownReply, reply: "Умения мне не показали.", own_actions: [] };
+  }
   const known = /\bthr_[a-z0-9]+/.exec(prompt || "");
   if (!known) return reply;
   return {

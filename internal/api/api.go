@@ -105,6 +105,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/local-model/available", s.availableModels)
 	mux.HandleFunc("POST /api/v1/local-model/select", s.selectLocalModel)
 
+	mux.HandleFunc("GET /api/v1/skills", s.listSkills)
+	mux.HandleFunc("POST /api/v1/skills/{id}/apply", s.applySkill)
+	mux.HandleFunc("POST /api/v1/skills/{id}/retire", s.retireSkill)
+
 	mux.HandleFunc("GET /api/v1/notices", s.listNotices)
 	mux.HandleFunc("POST /api/v1/notices/{id}/read", s.readNotice)
 	mux.HandleFunc("POST /api/v1/notices/mute", s.muteNotices)

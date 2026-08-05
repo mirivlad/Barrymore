@@ -714,6 +714,58 @@ async function loadWorkers() {
   } catch (err) {
     $("workers").innerHTML = `<li class="muted">${esc(err.message)}</li>`;
   }
+  loadSkills();
+}
+
+// loadSkills показывает собственные умения Бэрримора рядом со штатом.
+//
+// Место выбрано намеренно: штат отвечает на вопрос «кто может это сделать»,
+// и первым в списке должен стоять сам Бэрримор. Иначе выходит, что своих рук
+// у него нет и остаётся только звать.
+async function loadSkills() {
+  const box = $("skills");
+  if (!box) return;
+  try {
+    const d = await api("/api/v1/skills");
+    const items = d.items || [];
+    const used = {};
+    for (const r of d.runs || []) {
+      used[r.skill_id] = used[r.skill_id] || r;
+    }
+    box.innerHTML = items.length
+      ? items.map((sk) => {
+          const last = used[sk.id];
+          const live = sk.enabled && !sk.retired_why;
+          return `
+            <li>
+              <div class="row">
+                ${live ? tag("умеет", "ok") : tag("больше не пользуюсь", "bad")}
+                <strong>${esc(sk.title)}</strong>
+                ${sk.origin === "learned" ? tag("освоено") : ""}
+                <span class="grow"></span>
+                ${techNote(esc(sk.id))}
+              </div>
+              <div class="muted" style="margin-top:3px">отвечает на вопрос:
+                ${esc(sk.question)}</div>
+              ${
+                sk.retired_why
+                  ? `<div class="notes" style="margin-top:6px">${esc(sk.retired_why)}</div>`
+                  : ""
+              }
+              ${
+                last
+                  ? `<div class="muted" style="margin-top:4px">последний раз —
+                     ${ago(last.started_at)}, за ${last.took_ms} мс: ${esc(last.answer)}</div>`
+                  : `<div class="muted" style="margin-top:4px">ещё не применялось</div>`
+              }
+              ${techNote(`<div style="margin-top:4px">шаги: ${
+                (sk.steps || []).map((st) => esc(st.primitive)).join(" → ")}</div>`)}
+            </li>`;
+        }).join("")
+      : `<li class="muted">умений нет</li>`;
+  } catch (err) {
+    box.innerHTML = `<li class="muted">${esc(err.message)}</li>`;
+  }
 }
 
 // Класс исполнителя объясняется словами, а не жаргоном.
@@ -1979,6 +2031,25 @@ function takeTurn(turn) {
     });
   }
 
+  // Собственные умения идут первыми: если Бэрримор может посмотреть сам,
+  // владелец должен увидеть это раньше предложения кого-то звать.
+  (turn.own_actions || []).forEach((a, i) => {
+    if (a.refused) {
+      out.push({
+        id: `own-refused-${i}`, group: "changed",
+        what: "Не смог сделать это сам", which: "умения",
+        body: `<div>${esc(a.refused)}</div>`,
+      });
+      return;
+    }
+    out.push({
+      id: `own-${i}`, group: "needs", need: true,
+      what: `Могу посмотреть сам: ${a.title}`,
+      which: th.title || (th.proposed ? th.proposed.title : "") || "разговор",
+      body: ownActionBody(a, i),
+    });
+  });
+
   orders.forEach((o, i) => {
     const idx = o._index ?? i;
     out.push({
@@ -2033,6 +2104,30 @@ function takeTurn(turn) {
   }
 }
 
+// ownActionBody объясняет, что именно Бэрримор посмотрит и чего это стоит.
+//
+// Цена названа прямо и не случайно: она и есть довод в пользу того, чтобы
+// не звать исполнителя. Секунда против минуты — разница, которую владелец
+// должен видеть, а не принимать на веру.
+function ownActionBody(a, i) {
+  return `
+    <div>${esc(a.question)}</div>
+    ${a.why ? `<div class="muted" style="margin-top:4px">почему: ${esc(a.why)}</div>` : ""}
+    <dl class="kv" style="margin-top:8px">
+      <dt>каталог</dt><dd>${
+        a.target
+          ? esc(a.target)
+          : `<input id="skill-target-${i}" placeholder="/home/…/git/rollboard">`
+      }</dd>
+      <dt>чем это будет</dt><dd>своими средствами, сразу и бесплатно;
+        читаю, ничего не меняю</dd>
+    </dl>
+    <div class="row">
+      <button class="act" onclick="runSkill('${esc(a.skill_id)}', ${i}, '${esc(a.target || "")}')">
+        Посмотрите</button>
+    </div>`;
+}
+
 // orderProposalBody показывает поручение целиком — до того, как оно создано.
 //
 // Владелец видит ровно то, что уйдёт исполнителю, и решает по существу:
@@ -2068,6 +2163,37 @@ function orderProposalBody(o, i) {
       }> разрешить менять код</label>
     </div>`;
 }
+
+// runSkill применяет умение Бэрримора и возвращает ответ в разговор.
+//
+// Подтверждения здесь нет намеренно: умение только читает и только то, что
+// владелец уже разрешил. Спрашивать разрешения на каждый взгляд в каталог
+// значило бы превратить собственное умение в ту же бюрократию, ради обхода
+// которой оно и заведено.
+window.runSkill = async (skillID, index, target) => {
+  const field = document.getElementById(`skill-target-${index}`);
+  const where = (field ? field.value : target || "").trim();
+  if (!where) {
+    field?.focus();
+    return;
+  }
+  affairNotes.set(`own-${index}`, "Смотрю…");
+  renderAffairs();
+  try {
+    await api(`/api/v1/skills/${skillID}/apply`, {
+      method: "POST",
+      body: JSON.stringify({ target: where, conversation_id: currentConversation }),
+    });
+    turnAffairs = turnAffairs.filter((it) => it.id !== `own-${index}`);
+    affairNotes.delete(`own-${index}`);
+    await loadChat(false);
+    await loadThreadState();
+    await refreshAffairs();
+  } catch (err) {
+    affairNotes.set(`own-${index}`, `Посмотреть не вышло: ${err.message}`);
+    renderAffairs();
+  }
+};
 
 // startThreadFromTalk заводит нить по предложению. Название, вид и состояние
 // сервер берёт из журнала — переносить их через браузер незачем.

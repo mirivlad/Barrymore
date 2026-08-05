@@ -51,6 +51,19 @@ type harness struct {
 
 func newHarness(t *testing.T, prov model.Provider, pol memory.Policy) *harness {
 	t.Helper()
+	return newHarnessFull(t, prov, pol, nil)
+}
+
+// newHarnessWithSkills собирает разговор, знающий о собственных умениях.
+func newHarnessWithSkills(t *testing.T, pol memory.Policy,
+	skills conversation.SkillCatalog) *harness {
+	t.Helper()
+	return newHarnessFull(t, &scriptedProvider{}, pol, skills)
+}
+
+func newHarnessFull(t *testing.T, prov model.Provider, pol memory.Policy,
+	skills conversation.SkillCatalog) *harness {
+	t.Helper()
 	clk := testsupport.Clock()
 	db := testsupport.OpenDBAt(t, filepath.Join(t.TempDir(), "barrymore.db"))
 	j := event.NewJournal(db, clk)
@@ -61,6 +74,7 @@ func newHarness(t *testing.T, prov model.Provider, pol memory.Policy) *harness {
 	talk := conversation.New(conversation.Config{
 		DB: db, Journal: j, Clock: clk, Provider: prov,
 		Threads: th, Memory: mem, Runtime: rt, Logger: testsupport.Logger(t),
+		Skills: skills,
 	})
 
 	reg := projection.NewRegistry()

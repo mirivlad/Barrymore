@@ -22,6 +22,7 @@ import (
 	"github.com/mirivlad/barrymore/internal/model"
 	"github.com/mirivlad/barrymore/internal/projection"
 	"github.com/mirivlad/barrymore/internal/runtime"
+	"github.com/mirivlad/barrymore/internal/skill"
 	"github.com/mirivlad/barrymore/internal/store"
 	"github.com/mirivlad/barrymore/internal/thread"
 	"github.com/mirivlad/barrymore/internal/worker"
@@ -80,6 +81,7 @@ type App struct {
 	Delegation *delegation.Service
 	Memory     *memory.Service
 	Talk       *conversation.Service
+	Skills     *skill.Service
 	LocalModel *localmodel.Supervisor
 	Initiative *initiative.Service
 	Settings   *SettingsStore
@@ -209,13 +211,24 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 			return nil, err
 		}
 	}
+	// Умения поднимаются до разговора: разговор показывает их модели,
+	// и пустой список означал бы, что Бэрримор о себе не знает.
+	a.Skills = skill.New(skill.Config{
+		DB: db, Journal: a.Journal, Clock: cfg.Clock,
+		Policy: a.Policy, Logger: cfg.Logger,
+	})
+	if err := a.Skills.Restore(context.Background()); err != nil {
+		a.Close()
+		return nil, err
+	}
+
 	identity := conversation.DefaultIdentity()
 	identity.KeepsOwnModel = a.LocalModel.Enabled()
 	identity.MemoryRule = a.Memory.Policy().Rule()
 	a.Talk = conversation.New(conversation.Config{
 		DB: db, Journal: a.Journal, Clock: cfg.Clock, Provider: provider,
 		Threads: a.Threads, Memory: a.Memory, Runtime: a.Runtime, Logger: cfg.Logger,
-		Identity: identity,
+		Skills: a.Skills, Identity: identity,
 	})
 
 	a.Initiative = initiative.NewService(db, a.Journal, cfg.Clock,
@@ -229,6 +242,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	a.Delegation.Projections(a.Projector)
 	a.Memory.Projections(a.Projector)
 	a.Talk.Projections(a.Projector)
+	a.Skills.Projections(a.Projector)
 	a.Initiative.Projections(a.Projector)
 
 	a.collectStartupNotes()

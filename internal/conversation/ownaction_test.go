@@ -1,0 +1,141 @@
+package conversation_test
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/mirivlad/barrymore/internal/conversation"
+	"github.com/mirivlad/barrymore/internal/memory"
+	"github.com/mirivlad/barrymore/internal/skill"
+)
+
+// stubCatalog отдаёт заранее известный набор умений.
+type stubCatalog struct{ items []skill.Skill }
+
+func (c stubCatalog) Live() []skill.Skill { return c.items }
+
+func ownAction(id, target, why string) map[string]any {
+	return map[string]any{"own_actions": []any{map[string]any{
+		"skill_id": id, "target": target, "why": why,
+	}}}
+}
+
+var catalog = stubCatalog{items: []skill.Skill{{
+	ID: "git.worktree.diagnose", Title: "разобраться с рабочими копиями",
+	Question: "что происходит с worktree", NeedsTarget: true,
+	Origin: skill.OriginBuiltin, Enabled: true,
+}}}
+
+// Умение, которое Бэрримор показал сам, применимо: разговор доводит его
+// до владельца одним предложением, а не превращает в поручение.
+func TestOwnActionFromOfferedSkillPasses(t *testing.T) {
+	ctx := context.Background()
+	h := newHarnessWithSkills(t, memory.DefaultPolicy(), catalog)
+	h.prov.reply = reply("Сейчас посмотрю сам.",
+		ownAction("git.worktree.diagnose", "/home/x/git/rollboard", "вопрос о worktree"))
+
+	c := h.conversation(t, "")
+	turn, err := h.talk.Send(ctx, c.ID, "Rollboard завис в worktree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turn.OwnActions) != 1 {
+		t.Fatalf("собственное умение не предложено: %+v", turn.OwnActions)
+	}
+	a := turn.OwnActions[0]
+	if a.Refused != "" {
+		t.Fatalf("умение из показанного списка отвергнуто: %q", a.Refused)
+	}
+	if a.Title == "" || a.Question == "" {
+		t.Fatal("умение показано без названия и вопроса: выбрать по нему нельзя")
+	}
+	if a.Target != "/home/x/git/rollboard" {
+		t.Fatalf("каталог потерян: %q", a.Target)
+	}
+}
+
+// Придуманное умение отвергается так же, как придуманная нить: граница
+// полномочий совпадает с тем, что система показала сама.
+func TestInventedSkillIsRefusedWithExplanation(t *testing.T) {
+	ctx := context.Background()
+	h := newHarnessWithSkills(t, memory.DefaultPolicy(), catalog)
+	h.prov.reply = reply("Запущу диагностику.",
+		ownAction("shell.run", "/home/x", "почему бы и нет"))
+
+	c := h.conversation(t, "")
+	turn, err := h.talk.Send(ctx, c.ID, "разберись")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turn.OwnActions) != 1 {
+		t.Fatalf("отказ не показан владельцу: %+v", turn.OwnActions)
+	}
+	if turn.OwnActions[0].Refused == "" {
+		t.Fatal("выдуманное умение принято")
+	}
+	if !strings.Contains(turn.OwnActions[0].Refused, "shell.run") {
+		t.Fatalf("отказ не называет, что именно отвергнуто: %q", turn.OwnActions[0].Refused)
+	}
+}
+
+// Модель должна знать, что у неё есть руки. Без раздела с умениями она
+// вынуждена предлагать поручение на всё подряд.
+func TestSkillsAreShownToTheModel(t *testing.T) {
+	ctx := context.Background()
+	h := newHarnessWithSkills(t, memory.DefaultPolicy(), catalog)
+	h.prov.reply = reply("Понял.", nil)
+
+	c := h.conversation(t, "")
+	if _, err := h.talk.Send(ctx, c.ID, "что там с worktree?"); err != nil {
+		t.Fatal(err)
+	}
+	system := h.prov.lastReq.System
+	if !strings.Contains(system, "Что ты умеешь сам") {
+		t.Fatal("модели не сказано, что Бэрримор что-то умеет сам")
+	}
+	if !strings.Contains(system, "git.worktree.diagnose") {
+		t.Fatal("умение не названо: выбрать из показанного нечего")
+	}
+	if !strings.Contains(system, "work_order_proposals` пустым") &&
+		!strings.Contains(system, "оставляй `work_order_proposals`") {
+		t.Fatal("не сказано, что своё умение отменяет поручение")
+	}
+}
+
+// Пустой каталог не должен молчать: молчание модель читает как отсутствие
+// раздела, а не как отсутствие умений.
+func TestEmptyCatalogIsStatedOutLoud(t *testing.T) {
+	ctx := context.Background()
+	h := newHarnessWithSkills(t, memory.DefaultPolicy(), stubCatalog{})
+	h.prov.reply = reply("Понял.", nil)
+
+	c := h.conversation(t, "")
+	if _, err := h.talk.Send(ctx, c.ID, "посмотри каталог"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.prov.lastReq.System, "Умений пока нет") {
+		t.Fatal("пустота умений не названа вслух")
+	}
+}
+
+// Одно и то же умение дважды в одном ходу — не два дела.
+func TestDuplicateOwnActionsCollapse(t *testing.T) {
+	ctx := context.Background()
+	h := newHarnessWithSkills(t, memory.DefaultPolicy(), catalog)
+	h.prov.reply = reply("Посмотрю.", map[string]any{"own_actions": []any{
+		map[string]any{"skill_id": "git.worktree.diagnose", "target": "/x", "why": "раз"},
+		map[string]any{"skill_id": "git.worktree.diagnose", "target": "/x", "why": "два"},
+	}})
+
+	c := h.conversation(t, "")
+	turn, err := h.talk.Send(ctx, c.ID, "смотри")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turn.OwnActions) != 1 {
+		t.Fatalf("одно умение показано %d раз", len(turn.OwnActions))
+	}
+}
+
+var _ conversation.SkillCatalog = stubCatalog{}

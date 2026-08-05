@@ -371,6 +371,51 @@ async function main() {
     }
   }
 
+  console.log("Бэрримор делает сам:");
+
+  await check("вместо поручения предложено собственное умение", async () => {
+    await page.locator("#talk-input").fill("Посмотри сам, что там с worktree");
+    await page.locator("#talk-send").click();
+    await page.locator("#affairs").getByText("Могу посмотреть сам")
+      .waitFor({ timeout: 30000 });
+    const text = await page.locator("#affairs").innerText();
+    if (text.includes("Предлагаю поручить: Аудит")) {
+      throw new Error("рядом с собственным умением всё равно предложено поручение");
+    }
+    if (!text.includes("бесплатно")) {
+      throw new Error("не сказано, чего это стоит: сравнить с поручением нечем");
+    }
+  });
+
+  await check("умение применяется без подтверждения и отвечает в разговоре", async () => {
+    const before = await (await fetch(`${BASE}/api/v1/work-orders`)).json();
+    await page.getByRole("button", { name: "Посмотрите" }).click();
+    await waitFor("ответ пришёл в разговор", async () =>
+      (await page.locator("#chat").innerText()).includes("Посмотрел сам"));
+
+    const after = await (await fetch(`${BASE}/api/v1/work-orders`)).json();
+    if ((after.items || []).length !== (before.items || []).length) {
+      throw new Error("собственное умение всё-таки создало поручение");
+    }
+    const current = await page.locator("nav button[aria-current='true']").innerText();
+    if (current !== "Приёмная") throw new Error(`ушли на вкладку «${current}»`);
+  });
+
+  await check("посмотрел быстрее, чем успел бы позвать исполнителя", async () => {
+    const d = await (await fetch(`${BASE}/api/v1/skills`)).json();
+    const runs = d.runs || [];
+    if (!runs.length) throw new Error("применение умения не записано");
+    if (runs[0].status !== "done") throw new Error(`умение не сработало: ${runs[0].failure}`);
+    if (runs[0].took_ms > 5000) {
+      throw new Error(`умение шло ${runs[0].took_ms} мс — это уже не «сам и сразу»`);
+    }
+  });
+
+  await check("в центре по-прежнему нет служебных данных", async () => {
+    await centreIsClean("после собственного умения");
+    await chatIsCentral("после собственного умения");
+  });
+
   console.log("Узнавание уже существующей нити:");
 
   await check("новый разговор сам находит прежнюю нить", async () => {
