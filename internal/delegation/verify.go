@@ -140,6 +140,21 @@ func (s *Service) Finalize(ctx context.Context, orderID, runID string) error {
 	order.State = state
 	order.FailureReason = reason
 	s.reflectFinish(ctx, order, checks)
+
+	// Исход уходит в опыт: исполнитель — такой же способ работы, как и
+	// собственное умение, и сравнивать их можно только по одинаковой мерке.
+	if s.watcher != nil && order.WorkerID != "" {
+		result, evidence := "good", fmt.Sprintf("проверок пройдено %d из %d",
+			len(checks)-len(failures), len(checks))
+		if !passed {
+			result, evidence = "bad", reason
+		}
+		took := int64(0)
+		if order.StartedAt != nil {
+			took = s.clock.Now().Sub(*order.StartedAt).Milliseconds()
+		}
+		s.watcher.OrderFinished(ctx, order.WorkerID, order.WorkerID, result, evidence, took)
+	}
 	return nil
 }
 

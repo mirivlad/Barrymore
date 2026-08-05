@@ -17,6 +17,7 @@ import (
 	"github.com/mirivlad/barrymore/internal/delegation"
 	"github.com/mirivlad/barrymore/internal/event"
 	"github.com/mirivlad/barrymore/internal/initiative"
+	"github.com/mirivlad/barrymore/internal/learning"
 	"github.com/mirivlad/barrymore/internal/localmodel"
 	"github.com/mirivlad/barrymore/internal/memory"
 	"github.com/mirivlad/barrymore/internal/model"
@@ -82,6 +83,7 @@ type App struct {
 	Memory     *memory.Service
 	Talk       *conversation.Service
 	Skills     *skill.Service
+	Learning   *learning.Service
 	LocalModel *localmodel.Supervisor
 	Initiative *initiative.Service
 	Settings   *SettingsStore
@@ -222,13 +224,22 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 
+	// Обучение подключается к умениям сразу: опыт собирается тем же действием,
+	// что его порождает, а не отдельным обходом.
+	a.Learning = learning.New(learning.Config{
+		DB: db, Journal: a.Journal, Clock: cfg.Clock,
+		Skills: a.Skills, Runs: a.Skills, Logger: cfg.Logger,
+	})
+	a.Skills.Watch(a.Learning)
+	a.Delegation.Watch(a.Learning)
+
 	identity := conversation.DefaultIdentity()
 	identity.KeepsOwnModel = a.LocalModel.Enabled()
 	identity.MemoryRule = a.Memory.Policy().Rule()
 	a.Talk = conversation.New(conversation.Config{
 		DB: db, Journal: a.Journal, Clock: cfg.Clock, Provider: provider,
 		Threads: a.Threads, Memory: a.Memory, Runtime: a.Runtime, Logger: cfg.Logger,
-		Skills: a.Skills, Identity: identity,
+		Skills: a.Skills, Practices: a.Learning, Identity: identity,
 	})
 
 	a.Initiative = initiative.NewService(db, a.Journal, cfg.Clock,
@@ -243,6 +254,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	a.Memory.Projections(a.Projector)
 	a.Talk.Projections(a.Projector)
 	a.Skills.Projections(a.Projector)
+	a.Learning.Projections(a.Projector)
 	a.Initiative.Projections(a.Projector)
 
 	a.collectStartupNotes()

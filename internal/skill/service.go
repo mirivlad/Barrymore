@@ -22,6 +22,14 @@ import (
 // ErrUnknownSkill возвращается, когда умения нет или оно снято с применения.
 var ErrUnknownSkill = errors.New("такого умения у Бэрримора нет")
 
+// Watcher узнаёт об исходе применения умения.
+//
+// Опыт собирается тем же действием, что его порождает. Отдельный обход,
+// который надо не забыть запустить, рано или поздно забывают запускать.
+type Watcher interface {
+	SkillApplied(ctx context.Context, run Run)
+}
+
 // WorkspacePolicy разрешает или запрещает каталог.
 //
 // Собственное умение читает каталоги владельца, и это ровно тот же вопрос
@@ -43,9 +51,17 @@ type Service struct {
 	log     *slog.Logger
 	policy  WorkspacePolicy
 
-	mu     sync.RWMutex
-	prims  map[string]Primitive
-	skills []Skill
+	mu      sync.RWMutex
+	prims   map[string]Primitive
+	skills  []Skill
+	watcher Watcher
+}
+
+// Watch подключает наблюдателя за исходами.
+func (s *Service) Watch(w Watcher) {
+	s.mu.Lock()
+	s.watcher = w
+	s.mu.Unlock()
 }
 
 // Config — то, без чего умения не работают.
@@ -248,6 +264,13 @@ func (s *Service) Apply(ctx context.Context, req Request) (Run, error) {
 		return applyRun(ctx, tx, run)
 	}); err != nil {
 		return Run{}, err
+	}
+
+	s.mu.RLock()
+	w := s.watcher
+	s.mu.RUnlock()
+	if w != nil {
+		w.SkillApplied(ctx, run)
 	}
 	return run, nil
 }

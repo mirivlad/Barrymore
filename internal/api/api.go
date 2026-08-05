@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/skills", s.listSkills)
 	mux.HandleFunc("POST /api/v1/skills/{id}/apply", s.applySkill)
 	mux.HandleFunc("POST /api/v1/skills/{id}/retire", s.retireSkill)
+	mux.HandleFunc("POST /api/v1/skills/learn", s.learnSkill)
 
 	mux.HandleFunc("GET /api/v1/notices", s.listNotices)
 	mux.HandleFunc("POST /api/v1/notices/{id}/read", s.readNotice)

@@ -416,6 +416,69 @@ async function main() {
     await chatIsCentral("после собственного умения");
   });
 
+  console.log("Бэрримор учится:");
+
+  // Порядок действий владелец повторяет сам — запросами, а не через экран:
+  // проверяется не то, как нажимаются кнопки, а то, что Бэрримор это заметил.
+  const applySkill = (id) =>
+    fetch(`${BASE}/api/v1/skills/${id}/apply`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target: workspace }),
+    });
+
+  await check("повторяющийся порядок действий замечен", async () => {
+    // Три захода, а не два: первый сливается с уже применённой на этом
+    // каталоге диагностикой worktree и в отдельный порядок не выделяется.
+    for (let round = 0; round < 3; round++) {
+      for (const id of ["workspace.survey", "workspace.who"]) {
+        const res = await applySkill(id);
+        if (!res.ok) throw new Error(`умение ${id} не применилось: ${res.status}`);
+      }
+    }
+    const d = await (await fetch(`${BASE}/api/v1/skills`)).json();
+    const seq = (d.suggestions || [])[0];
+    if (!seq) throw new Error("повтор не замечен: предложений нет");
+    if (seq.seen_times < 2) throw new Error(`повторов насчитано ${seq.seen_times}`);
+  });
+
+  await check("Бэрримор просит освоить новый способ прямо в Приёмной", async () => {
+    await page.reload();
+    await page.locator("#affairs-toggle").click();
+    await page.locator("#affairs").getByText("Могу освоить новый способ")
+      .waitFor({ timeout: 15000 });
+  });
+
+  await check("освоенное умение появляется и применимо", async () => {
+    // Подробности раскрываются нажатием, не уводя с Приёмной.
+    await page.locator("#affairs .affair", { hasText: "Могу освоить новый способ" })
+      .locator(".affair-head").click();
+    await page.getByRole("button", { name: "Осваивайте" }).click();
+    await waitFor("умение освоено", async () => {
+      const d = await (await fetch(`${BASE}/api/v1/skills`)).json();
+      return (d.items || []).some((sk) => sk.origin === "learned");
+    });
+    const d = await (await fetch(`${BASE}/api/v1/skills`)).json();
+    const learned = (d.items || []).find((sk) => sk.origin === "learned");
+    if ((learned.steps || []).length < 2) {
+      throw new Error("освоенное умение собрано не из шагов прежних");
+    }
+    const res = await fetch(`${BASE}/api/v1/skills/${learned.id}/apply`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ target: workspace }),
+    });
+    if (!res.ok) throw new Error(`освоенное умение не применяется: ${res.status}`);
+    const run = await res.json();
+    if (run.status !== "done") throw new Error(`освоенное умение не сработало: ${run.failure}`);
+  });
+
+  await check("опыт виден рядом со способом, а не только в цифрах", async () => {
+    const d = await (await fetch(`${BASE}/api/v1/skills`)).json();
+    const p = (d.practices || []).find((x) => x.ref === "workspace.survey");
+    if (!p) throw new Error("опыт по умению не записан");
+    if (p.applied < 2) throw new Error(`применений насчитано ${p.applied}`);
+    if (p.avg_ms <= 0) throw new Error("цена способа не измерена: сравнить не с чем");
+  });
+
   console.log("Узнавание уже существующей нити:");
 
   await check("новый разговор сам находит прежнюю нить", async () => {

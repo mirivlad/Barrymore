@@ -717,6 +717,21 @@ async function loadWorkers() {
   loadSkills();
 }
 
+// practiceWords переводит запись опыта в строку, которую можно прочитать.
+//
+// Она же уходит в контекст модели: владелец и Бэрримор смотрят на один и тот
+// же довод, а не на разные.
+function practiceWords(p) {
+  if (!p) return "ещё не применялось";
+  if (p.stale) return `больше не пользуюсь: ${p.stale_why}`;
+  if (!p.applied) return "ещё не применялось";
+  const base = `применялось ${p.applied} раз`;
+  if (!p.failed) {
+    return p.avg_ms ? `${base}, без осечек, обычно за ${p.avg_ms} мс` : `${base}, без осечек`;
+  }
+  return `${base}, из них неудачных ${p.failed}`;
+}
+
 // loadSkills показывает собственные умения Бэрримора рядом со штатом.
 //
 // Место выбрано намеренно: штат отвечает на вопрос «кто может это сделать»,
@@ -732,6 +747,10 @@ async function loadSkills() {
     for (const r of d.runs || []) {
       used[r.skill_id] = used[r.skill_id] || r;
     }
+    // Опыт показывается рядом со способом: ровный перечень умений скрывал бы
+    // главное — что одно работает годами, а другое перестало работать вчера.
+    const record = {};
+    for (const p of d.practices || []) record[`${p.kind}:${p.ref}`] = p;
     box.innerHTML = items.length
       ? items.map((sk) => {
           const last = used[sk.id];
@@ -752,12 +771,11 @@ async function loadSkills() {
                   ? `<div class="notes" style="margin-top:6px">${esc(sk.retired_why)}</div>`
                   : ""
               }
-              ${
-                last
-                  ? `<div class="muted" style="margin-top:4px">последний раз —
-                     ${ago(last.started_at)}, за ${last.took_ms} мс: ${esc(last.answer)}</div>`
-                  : `<div class="muted" style="margin-top:4px">ещё не применялось</div>`
-              }
+              <div class="muted" style="margin-top:4px">${
+                esc(practiceWords(record[`own:${sk.id}`]))
+              }${
+                last ? ` · последний раз ${ago(last.started_at)}: ${esc(last.answer)}` : ""
+              }</div>
               ${techNote(`<div style="margin-top:4px">шаги: ${
                 (sk.steps || []).map((st) => esc(st.primitive)).join(" → ")}</div>`)}
             </li>`;
@@ -1362,11 +1380,12 @@ function renderAffairs() {
 // ничего не додумывает и после перезагрузки показывает то же самое.
 async function refreshAffairs() {
   const items = [...turnAffairs];
-  const [notices, orders, approvals, state] = await Promise.all([
+  const [notices, orders, approvals, state, skills] = await Promise.all([
     api("/api/v1/notices").catch(() => ({})),
     api("/api/v1/work-orders").catch(() => ({})),
     api("/api/v1/approvals/pending").catch(() => ({})),
     api("/api/v1/system/state").catch(() => ({})),
+    api("/api/v1/skills").catch(() => ({})),
   ]);
 
   const orderByID = new Map((orders.items || []).map((o) => [o.id, o]));
@@ -1421,6 +1440,36 @@ async function refreshAffairs() {
           <button class="ghost" onclick="showTab('orders');openOrder('${esc(o.id)}')">
             Подробности поручения</button>
         </div>`,
+    });
+  }
+
+  // Освоение нового способа — то, о чём Бэрримор просит сам. Это не отчёт
+  // и не напоминание: он заметил повторяющийся порядок действий и предлагает
+  // дать ему имя.
+  for (const sg of skills.suggestions || []) {
+    items.push({
+      id: `learn-${sg.id}`, group: "needs", need: true,
+      what: "Могу освоить новый способ", which: sg.title,
+      body: `<div>${esc(sg.why || "")}</div>
+        <div class="muted" style="margin-top:6px">сложится из того, что уже умею:
+          ${(sg.titles || []).map(esc).join(" → ")}</div>
+        <div class="row">
+          <button class="act" onclick="learnSkill('${esc(sg.id)}')">Осваивайте</button>
+        </div>`,
+    });
+  }
+
+  // Способ, признанный негодным, — тоже перемена, и молчать о ней нельзя:
+  // владелец должен узнать, что Бэрримор перестал чем-то пользоваться.
+  for (const p of skills.practices || []) {
+    if (!p.stale) continue;
+    items.push({
+      id: `stale-${p.id}`, group: "changed",
+      what: "Перестал пользоваться прежним способом", which: p.title || p.ref,
+      when: p.last_at,
+      body: `<div>${esc(p.stale_why || "")}</div>
+        <div class="muted" style="margin-top:6px">способ остался в разделе
+          «Штат» вместе с причиной — вернуть его можно там.</div>`,
     });
   }
 
@@ -2191,6 +2240,19 @@ window.runSkill = async (skillID, index, target) => {
     await refreshAffairs();
   } catch (err) {
     affairNotes.set(`own-${index}`, `Посмотреть не вышло: ${err.message}`);
+    renderAffairs();
+  }
+};
+
+// learnSkill принимает предложенный способ работы.
+window.learnSkill = async (suggestionID) => {
+  try {
+    await api("/api/v1/skills/learn", {
+      method: "POST", body: JSON.stringify({ suggestion_id: suggestionID }),
+    });
+    await refreshAffairs();
+  } catch (err) {
+    affairNotes.set(`learn-${suggestionID}`, `Не освоено: ${err.message}`);
     renderAffairs();
   }
 };

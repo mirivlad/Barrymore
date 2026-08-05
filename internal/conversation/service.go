@@ -13,6 +13,7 @@ import (
 	"github.com/mirivlad/barrymore/internal/clock"
 	"github.com/mirivlad/barrymore/internal/event"
 	"github.com/mirivlad/barrymore/internal/ids"
+	"github.com/mirivlad/barrymore/internal/learning"
 	"github.com/mirivlad/barrymore/internal/memory"
 	"github.com/mirivlad/barrymore/internal/model"
 	"github.com/mirivlad/barrymore/internal/projection"
@@ -33,16 +34,17 @@ var ErrNotFound = errors.New("разговор не найден")
 
 // Service ведёт разговор.
 type Service struct {
-	db       *store.DB
-	journal  *event.Journal
-	clock    clock.Clock
-	provider model.Provider
-	threads  *thread.Service
-	memory   *memory.Service
-	rt       *runtime.Runtime
-	skills   SkillCatalog
-	identity Identity
-	log      *slog.Logger
+	db        *store.DB
+	journal   *event.Journal
+	clock     clock.Clock
+	provider  model.Provider
+	threads   *thread.Service
+	memory    *memory.Service
+	rt        *runtime.Runtime
+	skills    SkillCatalog
+	practices PracticeCatalog
+	identity  Identity
+	log       *slog.Logger
 
 	// maxHistory ограничивает, сколько прошлых реплик уходит в модель.
 	maxHistory int
@@ -60,6 +62,7 @@ type Config struct {
 	Memory     *memory.Service
 	Runtime    *runtime.Runtime
 	Skills     SkillCatalog
+	Practices  PracticeCatalog
 	Identity   Identity
 	Logger     *slog.Logger
 	MaxHistory int
@@ -83,7 +86,8 @@ func New(cfg Config) *Service {
 	return &Service{
 		db: cfg.DB, journal: cfg.Journal, clock: cfg.Clock, provider: cfg.Provider,
 		threads: cfg.Threads, memory: cfg.Memory, rt: cfg.Runtime,
-		skills: cfg.Skills, identity: cfg.Identity, log: cfg.Logger,
+		skills: cfg.Skills, practices: cfg.Practices,
+		identity: cfg.Identity, log: cfg.Logger,
 		maxHistory: cfg.MaxHistory, maxTokens: cfg.MaxTokens,
 	}
 }
@@ -95,6 +99,15 @@ func New(cfg Config) *Service {
 // показала сама (тот же порядок, что и с нитями, ADR 0018).
 type SkillCatalog interface {
 	Live() []skill.Skill
+}
+
+// PracticeCatalog отдаёт то, чему научил опыт.
+//
+// Без него список способов выглядит ровным перечнем, и Бэрримор всякий раз
+// выбирает как в первый: что однажды не сработало, ничем не отличается от
+// того, что работает годами.
+type PracticeCatalog interface {
+	Practices(ctx context.Context) ([]learning.Practice, error)
 }
 
 // Available сообщает, доступен ли разговорный слой.
@@ -560,6 +573,26 @@ func (s *Service) buildContext(ctx context.Context, conv Conversation) (
 		trace = append(trace, fmt.Sprintf("собственных умений предложено: %d", len(live)))
 	}
 
+	// Опыт показывается рядом со способами и меняет выбор: способ с записью
+	// «три неудачи подряд» и способ с записью «семь раз без осечек» не должны
+	// выглядеть одинаково.
+	if s.practices != nil {
+		ps, err := s.practices.Practices(ctx)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if len(ps) > 0 {
+			var b strings.Builder
+			for _, p := range ps {
+				b.WriteString("- " + nonEmptyText(p.Title, p.Ref) + ": " + p.Record() + "\n")
+			}
+			sections = append(sections, ContextSection{
+				Title: "Чему научил опыт", Body: b.String(),
+			})
+			trace = append(trace, fmt.Sprintf("опыт по способам работы: %d записей", len(ps)))
+		}
+	}
+
 	items, err := s.memory.Active(ctx, 40)
 	if err != nil {
 		return nil, nil, nil, err
@@ -594,6 +627,13 @@ func (s *Service) buildContext(ctx context.Context, conv Conversation) (
 	}
 
 	return sections, trace, offered, nil
+}
+
+func nonEmptyText(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
 }
 
 // describeCanon переводит каноническое состояние нити в текст для модели.

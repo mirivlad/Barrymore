@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/mirivlad/barrymore/internal/event"
+	"github.com/mirivlad/barrymore/internal/learning"
 	"github.com/mirivlad/barrymore/internal/skill"
 	"github.com/mirivlad/barrymore/internal/thread"
 )
@@ -19,10 +20,77 @@ func (s *Server) listSkills(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "умения недоступны", err.Error())
 		return
 	}
+	practices, err := s.app.Learning.Practices(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "опыт недоступен", err.Error())
+		return
+	}
+	// Предложения освоить новое выводятся из journal'а применений и потому
+	// не хранятся: пока порядок повторяется, предложение есть; перестал
+	// повторяться — исчезло само, без чистки списков.
+	suggestions, err := s.app.Learning.Suggest(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "предложения недоступны", err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items": s.app.Skills.Skills(),
-		"runs":  runs,
+		"items":       s.app.Skills.Skills(),
+		"runs":        runs,
+		"practices":   practices,
+		"suggestions": suggestions,
 	})
+}
+
+// learnSkill принимает предложенный способ работы.
+//
+// Умение собирает runtime из шагов уже существующих умений. Владелец
+// соглашается — и повторяющийся порядок действий становится одним нажатием.
+func (s *Server) learnSkill(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		SuggestionID string `json:"suggestion_id"`
+		Title        string `json:"title"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+
+	suggestions, err := s.app.Learning.Suggest(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "предложения недоступны", err.Error())
+		return
+	}
+	var chosen *learning.Suggestion
+	for i := range suggestions {
+		if suggestions[i].ID == body.SuggestionID {
+			chosen = &suggestions[i]
+			break
+		}
+	}
+	if chosen == nil {
+		writeProblem(w, http.StatusConflict, "предложение устарело",
+			"такой порядок действий больше не повторяется; осваивать нечего")
+		return
+	}
+
+	known := map[string]skill.Skill{}
+	for _, sk := range s.app.Skills.Skills() {
+		known[sk.ID] = sk
+	}
+	composed, err := learning.Compose(*chosen, known)
+	if err != nil {
+		writeProblem(w, http.StatusConflict, "умение не собрано", err.Error())
+		return
+	}
+	if strings.TrimSpace(body.Title) != "" {
+		composed.Title = strings.TrimSpace(body.Title)
+	}
+
+	learned, err := s.app.Skills.Learn(r.Context(), composed, event.Actor{Type: event.ActorPerson})
+	if err != nil {
+		writeProblem(w, http.StatusConflict, "умение не освоено", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, learned)
 }
 
 // applySkill применяет умение и возвращает то, что Бэрримор увидел.

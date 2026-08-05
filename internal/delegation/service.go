@@ -36,9 +36,24 @@ type Service struct {
 	runner   *runner.Runner
 	log      *slog.Logger
 	dataRoot string
+	// watcher узнаёт об исходах поручений.
+	watcher Watcher
+
 	// modelPolicy задаёт допустимую стоимость моделей по умолчанию.
 	modelPolicy worker.ModelPolicy
 }
+
+// Watcher узнаёт, чем закончилось поручение.
+//
+// Опыт об исполнителях собирается тем же путём, что и опыт о собственных
+// умениях: иначе выбор между «сам» и «поручить» опирался бы на измерение
+// только одной из сторон.
+type Watcher interface {
+	OrderFinished(ctx context.Context, workerID, title, outcome, evidence string, tookMS int64)
+}
+
+// Watch подключает наблюдателя за исходами поручений.
+func (s *Service) Watch(w Watcher) { s.watcher = w }
 
 // Config — параметры сервиса.
 type Config struct {
