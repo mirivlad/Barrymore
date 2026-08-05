@@ -96,6 +96,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/local-model/select", s.selectLocalModel)
 
 	mux.HandleFunc("GET /api/v1/settings", s.getSettings)
+	mux.HandleFunc("POST /api/v1/settings/workspace-roots", s.addWorkspaceRoot)
+	mux.HandleFunc("DELETE /api/v1/settings/workspace-roots", s.removeWorkspaceRoot)
 	mux.HandleFunc("POST /api/v1/workers/{id}/enabled", s.setWorkerEnabled)
 
 	mux.Handle("/", s.ui())
@@ -1004,9 +1006,57 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		// Часть настроек применяется только при запуске. Молчать об этом
 		// значило бы дать владельцу поменять то, что не поменяется.
 		"restart_required": []string{
-			"адрес прослушивания", "разрешённые рабочие каталоги",
-			"порт локальной модели", "политика стоимости", "режим памяти",
+			"адрес прослушивания", "порт локальной модели",
+			"политика стоимости", "режим памяти",
 		},
+	})
+}
+
+// addWorkspaceRoot разрешает исполнителям видеть ещё один каталог.
+//
+// Действует сразу и на уже предложенные поручения тоже: ждать перезапуска
+// ради собственного решения владельцу незачем.
+func (s *Server) addWorkspaceRoot(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path string `json:"path"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	abs, err := app.CheckRoot(body.Path)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "каталог не разрешён", err.Error())
+		return
+	}
+	roots := s.app.Policy.SetRoots(append(s.app.Policy.Roots(), abs))
+	s.persistRoots(w, roots)
+}
+
+func (s *Server) removeWorkspaceRoot(w http.ResponseWriter, r *http.Request) {
+	target := r.URL.Query().Get("path")
+	kept := []string{}
+	for _, root := range s.app.Policy.Roots() {
+		if root != target {
+			kept = append(kept, root)
+		}
+	}
+	roots := s.app.Policy.SetRoots(kept)
+	s.persistRoots(w, roots)
+}
+
+// persistRoots сохраняет список и отвечает им же.
+func (s *Server) persistRoots(w http.ResponseWriter, roots []string) {
+	if _, err := s.app.Settings.Update(func(cur app.Settings) app.Settings {
+		cur.WorkspaceRoots = roots
+		return cur
+	}); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "список не сохранён", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"workspace_roots": roots,
+		"note": "изменение действует немедленно; на уже запущенные процессы " +
+			"оно не влияет — их изоляция задана при старте",
 	})
 }
 

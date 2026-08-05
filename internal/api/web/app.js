@@ -1441,16 +1441,24 @@ async function loadSettings() {
     $("tune-gpu").value = lm.gpu_layers ?? 0;
     $("tune-moe").value = lm.cpu_moe ?? 0;
 
+    const roots = s.workspace_roots || [];
+    $("roots-list").innerHTML = roots.length
+      ? roots.map((p) => `
+          <li>
+            <div class="row">
+              <span>${esc(p)}</span>
+              <span class="grow"></span>
+              <button class="ghost" onclick="removeRoot('${esc(p)}')">Убрать</button>
+            </div>
+          </li>`).join("")
+      : `<li><span class="tag bad">ни одного</span>
+         <span class="muted">поручения будут отклоняться политикой</span></li>`;
+
     $("settings-launch").innerHTML = `
       <table>
         <tr><th>Адрес интерфейса</th><td>${esc(s.addr)}</td></tr>
         <tr><th>Каталог данных</th><td>${esc(s.data_root)}</td></tr>
         <tr><th>Файл настроек</th><td>${esc(s.path)}</td></tr>
-        <tr><th>Разрешённые каталоги</th><td>${
-          (s.workspace_roots || []).length
-            ? s.workspace_roots.map(esc).join("<br>")
-            : `<span class="tag bad">не заданы</span> поручения будут отклоняться`
-        }</td></tr>
         <tr><th>Политика стоимости</th><td>${esc(s.model_policy)}</td></tr>
         <tr><th>Память</th><td>${esc(s.memory_policy)}</td></tr>
         <tr><th>Порт локальной модели</th><td>${esc(lm.port)}</td></tr>
@@ -1494,6 +1502,31 @@ window.selectModel = async (path) => {
     });
   } catch (err) {
     alert(`Модель не выбрана: ${err.message}`);
+  }
+  loadSettings();
+};
+
+$("root-add").addEventListener("click", async () => {
+  const path = $("root-new").value.trim();
+  if (!path) return;
+  try {
+    await api("/api/v1/settings/workspace-roots", {
+      method: "POST", body: JSON.stringify({ path }),
+    });
+    $("root-new").value = "";
+  } catch (err) {
+    alert(`Каталог не разрешён: ${err.message}`);
+  }
+  loadSettings();
+});
+
+window.removeRoot = async (path) => {
+  if (!confirm(`Убрать ${path} из разрешённых? Новые поручения по нему будут отклоняться.`)) return;
+  try {
+    await api(`/api/v1/settings/workspace-roots?path=${encodeURIComponent(path)}`,
+      { method: "DELETE" });
+  } catch (err) {
+    alert(`Не убрано: ${err.message}`);
   }
   loadSettings();
 };

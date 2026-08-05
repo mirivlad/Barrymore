@@ -396,12 +396,19 @@ func (a *App) Rebuild(ctx context.Context) error {
 //
 // 06_SECURITY §2.1: безопасность реализуется runtime, а не инструкцией модели.
 type Policy struct {
+	mu    sync.RWMutex
 	roots []string
 }
 
 // NewPolicy создаёт политику с разрешёнными корнями.
 func NewPolicy(roots []string) *Policy {
+	return &Policy{roots: cleanRoots(roots)}
+}
+
+// cleanRoots приводит пути к каноническому виду и убирает повторы.
+func cleanRoots(roots []string) []string {
 	clean := make([]string, 0, len(roots))
+	seen := map[string]bool{}
 	for _, r := range roots {
 		abs, err := filepath.Abs(r)
 		if err != nil {
@@ -410,13 +417,71 @@ func NewPolicy(roots []string) *Policy {
 		if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 			abs = resolved
 		}
+		if seen[abs] {
+			continue
+		}
+		seen[abs] = true
 		clean = append(clean, abs)
 	}
-	return &Policy{roots: clean}
+	return clean
 }
 
 // Roots возвращает разрешённые корни.
-func (p *Policy) Roots() []string { return append([]string(nil), p.roots...) }
+func (p *Policy) Roots() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return append([]string(nil), p.roots...)
+}
+
+// SetRoots заменяет список разрешённых корней.
+//
+// Меняется на ходу намеренно: разрешение каталога — то, ради чего владелец
+// не должен перезапускать систему. Отзыв разрешения тоже действует сразу,
+// иначе «я передумал» ничего не значило бы до перезагрузки.
+//
+// На уже идущие запуски это не влияет: их изоляция задана при старте процесса,
+// и утверждать обратное было бы обманом.
+func (p *Policy) SetRoots(roots []string) []string {
+	clean := cleanRoots(roots)
+	p.mu.Lock()
+	p.roots = clean
+	p.mu.Unlock()
+	return append([]string(nil), clean...)
+}
+
+// CheckRoot проверяет, что каталог годится в разрешённые.
+//
+// Отказ до записи: разрешить несуществующий путь значит поселить в настройках
+// строку, о которую всё будет спотыкаться потом.
+func CheckRoot(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", errors.New("путь не задан")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("путь %q: %w", path, err)
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	st, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("каталог %s недоступен: %w", abs, err)
+	}
+	if !st.IsDir() {
+		return "", fmt.Errorf("%s — не каталог", abs)
+	}
+	if abs == "/" {
+		return "", errors.New(
+			"корень файловой системы разрешать нельзя: это не ограничение, а его отсутствие")
+	}
+	if home, err := os.UserHomeDir(); err == nil && abs == home {
+		return "", errors.New(
+			"весь домашний каталог разрешать не стоит: укажите каталог с работой, " +
+				"иначе исполнители увидят почту, ключи и учётные записи")
+	}
+	return abs, nil
+}
 
 // AllowWorkspace проверяет, что путь лежит внутри разрешённого корня.
 //
@@ -433,17 +498,18 @@ func (p *Policy) AllowWorkspace(path string) error {
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = resolved
 	}
-	if len(p.roots) == 0 {
+	roots := p.Roots()
+	if len(roots) == 0 {
 		return errors.New(
 			"не задан ни один разрешённый рабочий каталог; " +
 				"доступ ко всему диску не является значением по умолчанию")
 	}
-	for _, root := range p.roots {
+	for _, root := range roots {
 		if abs == root || strings.HasPrefix(abs, root+string(filepath.Separator)) {
 			return nil
 		}
 	}
-	return fmt.Errorf("каталог %q находится вне разрешённых корней %v", abs, p.roots)
+	return fmt.Errorf("каталог %q находится вне разрешённых корней %v", abs, roots)
 }
 
 // Check реализует runtime.PolicyGate.

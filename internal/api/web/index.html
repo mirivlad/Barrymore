@@ -318,6 +318,17 @@
       </div>
     </div>
     <div class="card">
+      <h2>Что исполнителям можно видеть</h2>
+      <p class="muted">Поручения выполняются только внутри этих каталогов.
+        Пустой список — не «всё разрешено», а «ничего»: доступ ко всему диску
+        не является значением по умолчанию.</p>
+      <ul class="plain" id="roots-list"><li class="muted">загрузка…</li></ul>
+      <div class="row" style="margin-top:10px">
+        <div class="grow"><input id="root-new" placeholder="/home/…/git"></div>
+        <button class="ghost" id="root-add">Разрешить каталог</button>
+      </div>
+    </div>
+    <div class="card">
       <h2>Кого привлекать</h2>
       <p class="muted">Отключённый исполнитель остаётся в штате и виден, но
         поручения ему не достаются. Решение записывается в журнал.</p>
