@@ -291,16 +291,38 @@ func (s *Service) Pending(ctx context.Context) (Summary, error) {
 		return out, err
 	}
 	out.HeldCount = len(held)
-	if out.HeldCount > 0 {
-		now := s.clock.Now()
-		switch {
-		case s.policy.Quiet(now):
-			out.HeldReason = fmt.Sprintf(
-				"ждут конца тихих часов: скажу после %02d:00", s.policy.QuietTo)
-		default:
-			out.HeldReason = fmt.Sprintf(
-				"сегодня уже %d обращений — остальное подождёт до завтра", s.policy.MaxPerDay)
+	if out.HeldCount == 0 {
+		return out, nil
+	}
+
+	// Причина удержания выясняется, а не угадывается. Сказать «предел
+	// исчерпан», когда обращение просто ждёт утра, — то самое объяснение,
+	// которое звучит уверенно и вводит в заблуждение.
+	now := s.clock.Now()
+	waitingForTime := 0
+	for _, n := range held {
+		if n.DeliverAt.After(now) {
+			waitingForTime++
 		}
+	}
+	used, err := s.deliveredToday(ctx, now)
+	if err != nil {
+		return out, err
+	}
+
+	switch {
+	case waitingForTime == out.HeldCount:
+		out.HeldReason = fmt.Sprintf("ждут конца тихих часов: скажу после %02d:00",
+			s.policy.QuietTo)
+	case used >= s.policy.MaxPerDay:
+		out.HeldReason = fmt.Sprintf(
+			"сегодня уже %d обращений — остальное подождёт до завтра", used)
+	case waitingForTime > 0:
+		out.HeldReason = fmt.Sprintf(
+			"%d ждут конца тихих часов, остальные — следующей проверки",
+			waitingForTime)
+	default:
+		out.HeldReason = "будут показаны при следующей проверке"
 	}
 	return out, nil
 }

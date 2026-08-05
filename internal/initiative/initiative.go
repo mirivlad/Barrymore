@@ -126,11 +126,16 @@ func (p Policy) Muted(kind, subjectID string) bool {
 }
 
 // Quiet сообщает, попадает ли момент в тихие часы.
+//
+// Считается по местному времени машины владельца, а не по UTC. Часы Бэрримора
+// внутри идут в UTC (так требует детерминированность журнала), и «молчу
+// с 23 до 8» по ним означало бы для владельца в UTC+8 молчание с семи утра
+// до четырёх дня — то есть ровно наоборот.
 func (p Policy) Quiet(at time.Time) bool {
 	if p.QuietFrom == p.QuietTo {
 		return false
 	}
-	h := at.Hour()
+	h := at.Local().Hour()
 	if p.QuietFrom < p.QuietTo {
 		return h >= p.QuietFrom && h < p.QuietTo
 	}
@@ -143,11 +148,12 @@ func (p Policy) NextAudible(at time.Time) time.Time {
 	if !p.Quiet(at) {
 		return at
 	}
-	next := time.Date(at.Year(), at.Month(), at.Day(), p.QuietTo, 0, 0, 0, at.Location())
-	if !next.After(at) {
+	local := at.Local()
+	next := time.Date(local.Year(), local.Month(), local.Day(), p.QuietTo, 0, 0, 0, local.Location())
+	if !next.After(local) {
 		next = next.Add(24 * time.Hour)
 	}
-	return next
+	return next.UTC()
 }
 
 // Describe объясняет режим человеческими словами.
@@ -156,8 +162,8 @@ func (p Policy) Describe() string {
 		return "Бэрримор не обращается первым"
 	}
 	return fmt.Sprintf(
-		"Бэрримор обращается сам не чаще %d раз в сутки и молчит с %02d:00 до %02d:00; "+
-			"срочное проходит и в тихие часы",
+		"Бэрримор обращается сам не чаще %d раз в сутки и молчит с %02d:00 до %02d:00 "+
+			"по местному времени; срочное проходит и в тихие часы",
 		p.MaxPerDay, p.QuietFrom, p.QuietTo)
 }
 

@@ -3,6 +3,7 @@ package initiative_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,8 +119,8 @@ func TestQuietHoursDelayButDoNotCancel(t *testing.T) {
 	p := initiative.DefaultPolicy()
 	p.QuietFrom, p.QuietTo = 23, 8
 	h := newHarness(t, p, candidate(initiative.KindOrderFinished, "wo_1"))
-	// Полночь.
-	h.clk.Set(time.Date(2026, 8, 5, 0, 30, 0, 0, time.UTC))
+	// Полночь по местному времени: тихие часы объявлены в нём.
+	h.clk.Set(time.Date(2026, 8, 5, 0, 30, 0, 0, time.Local).UTC())
 	ctx := context.Background()
 
 	if _, delivered, err := h.svc.Tick(ctx); err != nil {
@@ -137,7 +138,7 @@ func TestQuietHoursDelayButDoNotCancel(t *testing.T) {
 	}
 
 	// Утро наступило — обращение доходит.
-	h.clk.Set(time.Date(2026, 8, 5, 9, 0, 0, 0, time.UTC))
+	h.clk.Set(time.Date(2026, 8, 5, 9, 0, 0, 0, time.Local).UTC())
 	if _, delivered, err := h.svc.Tick(ctx); err != nil {
 		t.Fatal(err)
 	} else if delivered != 1 {
@@ -155,7 +156,7 @@ func TestUrgentPassesThroughQuietHours(t *testing.T) {
 
 	p := initiative.DefaultPolicy()
 	h := newHarness(t, p, urgent)
-	h.clk.Set(time.Date(2026, 8, 5, 2, 0, 0, 0, time.UTC))
+	h.clk.Set(time.Date(2026, 8, 5, 2, 0, 0, 0, time.Local).UTC())
 
 	if _, delivered, err := h.svc.Tick(context.Background()); err != nil {
 		t.Fatal(err)
@@ -307,10 +308,36 @@ func TestQuietHoursAcrossMidnight(t *testing.T) {
 		quiet bool
 	}{{23, true}, {0, true}, {3, true}, {7, true}, {8, false}, {12, false}, {22, false}}
 	for _, c := range cases {
-		at := time.Date(2026, 8, 5, c.hour, 0, 0, 0, time.UTC)
+		// Момент задаётся местным временем: тихие часы объявлены в нём.
+		at := time.Date(2026, 8, 5, c.hour, 0, 0, 0, time.Local)
 		if got := p.Quiet(at); got != c.quiet {
 			t.Errorf("%02d:00 → тихо=%v, ожидалось %v", c.hour, got, c.quiet)
 		}
+	}
+}
+
+// Часы Бэрримора внутри идут в UTC, а тихие часы объявлены местным временем.
+// Считать их по UTC значило бы для владельца в UTC+8 молчать с семи утра
+// до четырёх дня — ровно наоборот задуманному.
+func TestQuietHoursFollowLocalTimeNotUTC(t *testing.T) {
+	p := initiative.DefaultPolicy()
+	p.QuietFrom, p.QuietTo = 23, 8
+
+	// Полдень по местному времени — говорить можно, каким бы ни был UTC.
+	noon := time.Date(2026, 8, 5, 12, 0, 0, 0, time.Local)
+	if p.Quiet(noon.UTC()) {
+		t.Fatalf("полдень (%s местного, %s UTC) признан тихим часом",
+			noon.Format("15:04"), noon.UTC().Format("15:04"))
+	}
+
+	// Глубокая ночь по местному — молчим.
+	night := time.Date(2026, 8, 5, 2, 0, 0, 0, time.Local)
+	if !p.Quiet(night.UTC()) {
+		t.Fatal("два часа ночи по местному времени не признаны тихим часом")
+	}
+	// И конец тишины считается тоже по местному.
+	if got := p.NextAudible(night.UTC()).Local().Hour(); got != 8 {
+		t.Fatalf("тишина кончается в %02d:00 местного, ожидалось 08:00", got)
 	}
 }
 
@@ -343,4 +370,50 @@ func quietFreePolicy() initiative.Policy {
 	p := initiative.DefaultPolicy()
 	p.QuietFrom, p.QuietTo = 0, 0
 	return p
+}
+
+// Причина удержания должна быть настоящей. Сказать «предел исчерпан», когда
+// обращение просто ждёт утра, — объяснение, которое звучит уверенно и вводит
+// в заблуждение.
+func TestHeldReasonNamesTheRealCause(t *testing.T) {
+	p := initiative.DefaultPolicy()
+	p.QuietFrom, p.QuietTo = 23, 8
+	h := newHarness(t, p, candidate(initiative.KindOrderFinished, "wo_1"))
+	h.clk.Set(time.Date(2026, 8, 5, 1, 0, 0, 0, time.Local).UTC())
+	ctx := context.Background()
+
+	if _, _, err := h.svc.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sum, _ := h.svc.Pending(ctx)
+	if sum.HeldCount != 1 {
+		t.Fatalf("удержано %d", sum.HeldCount)
+	}
+	if !strings.Contains(sum.HeldReason, "тихих часов") {
+		t.Fatalf("причина удержания названа неверно: %q", sum.HeldReason)
+	}
+	if strings.Contains(sum.HeldReason, "уже") {
+		t.Fatalf("удержание по времени выдано за исчерпанный предел: %q", sum.HeldReason)
+	}
+}
+
+// А когда предел действительно исчерпан — так и сказано.
+func TestHeldReasonNamesTheLimitWhenItIsTheCause(t *testing.T) {
+	p := quietFreePolicy()
+	p.MaxPerDay = 1
+	h := newHarness(t, p,
+		candidate(initiative.KindOrderFinished, "wo_1"),
+		candidate(initiative.KindOrderFinished, "wo_2"))
+	ctx := context.Background()
+
+	if _, _, err := h.svc.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sum, _ := h.svc.Pending(ctx)
+	if sum.HeldCount != 1 {
+		t.Fatalf("удержано %d, ожидалось 1", sum.HeldCount)
+	}
+	if !strings.Contains(sum.HeldReason, "завтра") {
+		t.Fatalf("исчерпанный предел не назван причиной: %q", sum.HeldReason)
+	}
 }
