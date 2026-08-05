@@ -67,7 +67,11 @@ type Model struct {
 // как бы она ни называлась. Снять отметку может только владелец вручную.
 func (m Model) Charged() bool { return m.VerifiedAt != nil && m.LastCost > 0 }
 
-// CostSummary объясняет стоимость человеческими словами.
+// CostSummary называет вывод о стоимости.
+//
+// Основание сюда не входит: его добавляет вызывающий, ровно один раз.
+// Раньше для бесплатных моделей основание попадало и сюда, и следом в скобки —
+// причина выбора повторяла сама себя и читалась как невнятица.
 func (m Model) CostSummary(now time.Time) string {
 	if m.Charged() {
 		return fmt.Sprintf("платная: наблюдалось списание %.6f (%s)",
@@ -75,7 +79,7 @@ func (m Model) CostSummary(now time.Time) string {
 	}
 	switch m.CostTier {
 	case CostFree:
-		return "бесплатна: " + m.Evidence
+		return "бесплатна"
 	case CostSubscription:
 		return "расходует квоту подписки"
 	case CostPaid:
@@ -229,7 +233,7 @@ func SelectModel(models []Model, policy ModelPolicy, preferred string, now time.
 	best := allowed[0]
 	reason := fmt.Sprintf("модель %s: %s", best.Ref, best.CostSummary(now))
 	if best.Evidence != "" {
-		reason += " (" + best.Evidence + ")"
+		reason += " — " + best.Evidence
 	}
 	if best.IsDefault {
 		reason += "; объявлена исполнителем как модель по умолчанию"

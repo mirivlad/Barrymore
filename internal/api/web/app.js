@@ -634,6 +634,23 @@ const CLASS_LABEL = {
   specialist: "мастер по вызову",
 };
 
+// Уровень доверия говорит, что исполнителю позволено, а не как он называется
+// внутри. `worktree_write` ничего не сообщает тому, кто не читал спецификацию.
+const TRUST_LABEL = {
+  observe: "только наблюдение",
+  workspace_read: "разрешено только читать",
+  proposal_only: "разрешено только предлагать",
+  worktree_write: "разрешено писать в отдельную ветку",
+  workspace_write: "разрешено писать в рабочий каталог",
+  external_side_effects: "разрешены действия вовне",
+};
+
+const AUTH_LABEL = {
+  configured: "учётная запись настроена",
+  missing: "учётная запись не настроена",
+  unknown: "про учётную запись ничего не известно",
+};
+
 function costTag(tier, charged) {
   if (charged) return tag("списывала деньги", "bad");
   switch (tier) {
@@ -668,8 +685,8 @@ function renderWorkers(items) {
             </div>
             <div class="muted" style="margin-top:6px">
               ${esc(v.worker.executable_path || "путь неизвестен")}<br>
-              доверие: ${esc(v.worker.trust_level)} ·
-              учётная запись: ${esc(v.worker.auth_state)} ·
+              ${esc(say(v.worker.trust_level, TRUST_LABEL))} ·
+              ${esc(say(v.worker.auth_state, AUTH_LABEL))} ·
               проверено ${ago(v.worker.last_probe_at)}
             </div>
             <div class="muted" style="margin-top:6px">${esc(a.reason || "")}</div>

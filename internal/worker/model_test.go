@@ -1,6 +1,7 @@
 package worker_test
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -200,5 +201,25 @@ func TestPolicyNames(t *testing.T) {
 	}
 	if _, err := worker.ParseModelPolicy("что-нибудь"); err == nil {
 		t.Fatal("принята неизвестная политика стоимости")
+	}
+}
+
+// Причина выбора не должна повторять сама себя. Раньше основание попадало
+// в неё дважды — из вывода о стоимости и следом в скобки, — и владелец читал
+// одну и ту же фразу подряд.
+func TestSelectionReasonStatesEvidenceOnce(t *testing.T) {
+	models := []worker.Model{named("opencode/deepseek-v4-flash-free")}
+	best, reason, err := worker.SelectModel(models, worker.FreeOnly(), "", now)
+	if err != nil {
+		t.Fatalf("модель не выбрана: %v", err)
+	}
+	if best.Evidence == "" {
+		t.Fatal("у выбранной модели нет основания")
+	}
+	if n := strings.Count(reason, best.Evidence); n != 1 {
+		t.Fatalf("основание встречается в причине %d раз, ожидался один:\n%s", n, reason)
+	}
+	if !strings.Contains(reason, "бесплатна") {
+		t.Fatalf("вывод о стоимости пропал из причины: %s", reason)
 	}
 }
