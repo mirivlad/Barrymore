@@ -428,7 +428,8 @@ func TestLivenessReportsDeadProcessWithUnit(t *testing.T) {
 // проверяется само устройство команды: со scope владельцем времени жизни
 // является systemd, без него — только Бэрримор, и тогда флаг нужен.
 func TestSandboxLifetimeMatchesItsOwner(t *testing.T) {
-	r, _ := newRunner(t, &recordingSink{})
+	sink := &recordingSink{}
+	r, _ := newRunner(t, sink)
 	caps := r.Capabilities()
 	if caps.Bwrap == "" {
 		t.Skip("bubblewrap недоступен")
@@ -442,6 +443,12 @@ func TestSandboxLifetimeMatchesItsOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("запуск: %v", err)
 	}
+	// Процесс надо дождаться: иначе горутина ожидания переживёт тест и
+	// напишет в уже закрытую базу.
+	waitFor(t, "процесс завершился", func() bool {
+		_, _, _, exited := sink.snapshot()
+		return exited
+	})
 
 	hasFlag := slices.Contains(res.Argv, "--die-with-parent")
 	if caps.SystemdRun != "" {
