@@ -1122,13 +1122,56 @@ window.cancelOrder = async (id) => {
   loadOrders();
 };
 
+// Отчёт — это результат работы, ради которого всё затевалось. Показывать его
+// сырым JSON значит заставлять владельца читать машинный формат там, где
+// он ждёт ответа на свой вопрос. Сырой текст остаётся под раскрытием.
+const FINDING_TONE = {
+  critical: "bad", high: "bad", major: "bad",
+  medium: "warn", moderate: "warn", warning: "warn",
+  low: "", minor: "", info: "",
+};
+
 window.showReport = async (id) => {
   const box = $("order-report");
+  box.innerHTML = `<div class="muted" style="margin-top:12px">загрузка…</div>`;
   try {
     const d = await api(`/api/v1/work-orders/${id}/report`);
+    const r = d.report || {};
+    const findings = r.findings || [];
     box.innerHTML = `
       <div class="notes" style="margin-top:12px">${esc(d.note)}</div>
-      <pre>${esc(JSON.stringify(d.report, null, 2))}</pre>`;
+      ${r.summary ? `<p style="margin-top:10px">${esc(r.summary)}</p>` : ""}
+      ${
+        findings.length
+          ? `<h2 style="margin-top:12px">Находки (${findings.length})</h2>
+             <ul class="plain">${findings.map((f) => `
+               <li>
+                 <div class="row">
+                   ${tag(f.severity || "info", FINDING_TONE[String(f.severity).toLowerCase()])}
+                   <strong>${esc(f.title || "без заголовка")}</strong>
+                   ${f.path ? `<span class="muted"><code>${esc(f.path)}</code></span>` : ""}
+                 </div>
+                 ${f.evidence ? `<div class="muted" style="margin-top:4px">${esc(f.evidence)}</div>` : ""}
+               </li>`).join("")}</ul>`
+          : `<p class="muted" style="margin-top:10px">Находок нет.</p>`
+      }
+      ${
+        (r.checked_paths || []).length
+          ? `<div class="muted" style="margin-top:10px">Просмотрено: ${
+              r.checked_paths.map(esc).join(", ")
+            }</div>`
+          : ""
+      }
+      ${
+        r.limitations
+          ? `<div class="notes" style="margin-top:10px">Чего проверить не удалось:
+             ${esc(r.limitations)}</div>`
+          : ""
+      }
+      <details style="margin-top:10px">
+        <summary class="muted">исходный отчёт как есть</summary>
+        <pre>${esc(JSON.stringify(r, null, 2))}</pre>
+      </details>`;
   } catch (err) {
     box.innerHTML = `<div class="muted" style="margin-top:12px">${esc(err.message)}</div>`;
   }
