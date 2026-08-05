@@ -1,12 +1,16 @@
 package app_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/mirivlad/barrymore/internal/app"
+	"github.com/mirivlad/barrymore/internal/memory"
+	"github.com/mirivlad/barrymore/internal/testsupport"
+	"github.com/mirivlad/barrymore/internal/worker"
 )
 
 // --- настройки ---
@@ -298,4 +302,46 @@ func mentions(notes []string, substr string) bool {
 		}
 	}
 	return false
+}
+
+// --- один экземпляр на каталог данных ---
+
+// Двое на одном журнале расходятся тихо: две реакции на одно расхождение,
+// два обращения об одном факте, оба считают сервер модели своим. Владелец
+// увидел бы систему, которая спорит сама с собой. Найдено на этой машине:
+// второй экземпляр запускался молча.
+func TestSecondInstanceOnSameDataRootIsRefused(t *testing.T) {
+	dataRoot := t.TempDir()
+	ctx := context.Background()
+	cfg := app.Config{
+		DataRoot: dataRoot, Addr: "127.0.0.1:0",
+		ModelPolicy: worker.FreeOnly(), MemoryPolicy: memory.DefaultPolicy(),
+		Logger: testsupport.Logger(t),
+	}
+
+	first, err := app.New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("первый экземпляр: %v", err)
+	}
+
+	_, err = app.New(ctx, cfg)
+	if err == nil {
+		t.Fatal("второй Бэрримор запустился на том же каталоге данных")
+	}
+	for _, want := range []string{"занят", "data-root"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("владельцу непонятно, что делать: %v", err)
+		}
+	}
+
+	// После остановки каталог освобождается: иначе перезапуск требовал бы
+	// удалять файл замка руками.
+	if err := first.Close(); err != nil {
+		t.Fatalf("остановка первого: %v", err)
+	}
+	second, err := app.New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("после остановки каталог обязан освободиться: %v", err)
+	}
+	_ = second.Close()
 }

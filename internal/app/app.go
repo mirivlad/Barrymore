@@ -91,6 +91,9 @@ type App struct {
 	// StartupNotes честно перечисляет ограничения текущего запуска.
 	StartupNotes []string
 
+	// lock не даёт второму экземпляру работать на том же каталоге данных.
+	lock *lockfile
+
 	stopOnce sync.Once
 	stopped  chan struct{}
 	wg       sync.WaitGroup
@@ -134,15 +137,24 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		}
 	}
 
+	// Замок берётся до открытия базы: SQLite в режиме WAL пустит второй
+	// экземпляр молча, и разойдутся они уже на ходу.
+	lock, err := lockDataRoot(cfg.DataRoot)
+	if err != nil {
+		return nil, err
+	}
+
 	db, err := store.Open(ctx, store.Options{
 		Path:   filepath.Join(cfg.DataRoot, "barrymore.db"),
 		Logger: cfg.Logger,
 	})
 	if err != nil {
+		lock.release()
 		return nil, err
 	}
 
-	a := &App{Config: cfg, DB: db, Log: cfg.Logger, Clock: cfg.Clock, stopped: make(chan struct{})}
+	a := &App{Config: cfg, DB: db, Log: cfg.Logger, Clock: cfg.Clock,
+		lock: lock, stopped: make(chan struct{})}
 	a.Settings = NewSettingsStore(cfg.DataRoot, cfg.Settings)
 	a.Journal = event.NewJournal(db, cfg.Clock)
 	a.Policy = NewPolicy(cfg.WorkspaceRoots)
@@ -155,7 +167,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	a.Registry = worker.NewRegistry(db, a.Journal, cfg.Clock, a.Runtime)
 
 	if err := a.registerAdapters(); err != nil {
-		db.Close()
+		a.Close()
 		return nil, err
 	}
 
@@ -165,7 +177,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		DataRoot: cfg.DataRoot, ModelPolicy: cfg.ModelPolicy,
 	})
 	if err := a.Delegation.RegisterReflexes(); err != nil {
-		db.Close()
+		a.Close()
 		return nil, err
 	}
 
@@ -193,7 +205,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	})
 	if a.LocalModel.Enabled() {
 		if err := a.LocalModel.RegisterReflexes(); err != nil {
-			db.Close()
+			a.Close()
 			return nil, err
 		}
 	}
@@ -420,8 +432,18 @@ func (a *App) tickLoop(ctx context.Context) {
 func (a *App) Close() error {
 	a.stopOnce.Do(func() { close(a.stopped) })
 	a.wg.Wait()
-	a.Delegation.Runner().Shutdown()
-	return a.DB.Close()
+	// Close вызывается и при неудачной сборке, когда собрано ещё не всё:
+	// падать на уборке — худший способ сообщить о проблеме в другом месте.
+	if a.Delegation != nil {
+		a.Delegation.Runner().Shutdown()
+	}
+	var err error
+	if a.DB != nil {
+		err = a.DB.Close()
+	}
+	// Замок снимается последним: пока база открыта, каталог занят.
+	a.lock.release()
+	return err
 }
 
 // Rebuild пересобирает проекции из журнала.
