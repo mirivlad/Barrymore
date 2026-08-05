@@ -370,8 +370,13 @@ func (r *Runner) tail(ctx context.Context, runID string, a worker.Adapter, path 
 		}
 
 		idle++
-		// Процесс завершился и новых строк нет — читать больше нечего.
 		if idle > 3 && !r.Alive(ProcessIdentityForRun(runID)) {
+			// Мёртвый процесс больше ничего не напишет — но то, что он написал
+			// между последним чтением и этой проверкой, лежит непрочитанным.
+			// Окно узкое, и попадает в него ровно последняя строка: исполнитель
+			// сообщает итог и тут же завершается. Уйти отсюда, не дочитав,
+			// значит потерять именно тот вывод, ради которого его запускали.
+			offset = r.drain(ctx, runID, a, reader, offset)
 			r.finishAttachment(ctx, runID, offset)
 			return
 		}
@@ -380,6 +385,24 @@ func (r *Runner) tail(ctx context.Context, runID string, a worker.Adapter, path 
 			return
 		case <-time.After(r.PollInterval):
 		}
+	}
+}
+
+// drain дочитывает всё, что процесс успел написать перед смертью.
+//
+// Незавершённая последняя строка не отдаётся: процесс умер посреди неё и
+// никогда её не допишет. Разобрать обрубок нельзя, а выдать половину сообщения
+// за целое — хуже, чем промолчать о нём.
+func (r *Runner) drain(ctx context.Context, runID string, a worker.Adapter,
+	reader *bufio.Reader, offset int64) int64 {
+
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) == 0 || err != nil {
+			return offset
+		}
+		offset += int64(len(line))
+		r.emit(ctx, runID, a, line, offset)
 	}
 }
 

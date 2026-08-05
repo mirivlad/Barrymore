@@ -513,3 +513,34 @@ func TestOutputIsReadEvenWhenWorkerIsSlowToSpeak(t *testing.T) {
 		return len(observationsOf(t, rt, "run_slow_talker", runtime.ObsRunEvent)) == 1
 	})
 }
+
+// Последняя строка исполнителя не должна теряться оттого, что он сразу умер.
+//
+// Читатель опрашивает файл и уходит, когда процесс мёртв. Между последним
+// чтением и проверкой живости есть окно, и попадает в него ровно итоговая
+// строка: исполнитель сообщает результат и тут же завершается. Найдено
+// прогоном на этой машине — читатель уходил, не дочитав.
+func TestLastLineSurvivesImmediateExit(t *testing.T) {
+	ctx := context.Background()
+	sink := &recordingSink{}
+	r, rt := newRunner(t, sink)
+
+	// Пауза длиннее нескольких опросов, затем вывод и немедленная смерть.
+	a := &shAdapter{script: `
+		sleep 1
+		echo '{"summary":"первое"}'
+		echo '{"summary":"итог"}'`}
+	plan, _ := a.Plan(ctx, worker.Installation{}, worker.RunRequest{})
+
+	res, err := r.Start(ctx, runner.StartRequest{
+		RunID: "run_last_word", Adapter: a, Plan: plan, RunDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("запуск: %v", err)
+	}
+	t.Cleanup(func() { _ = runner.Terminate(r.Capabilities(), res.Identity, true) })
+
+	waitFor(t, "обе строки прочитаны", func() bool {
+		return len(observationsOf(t, rt, "run_last_word", runtime.ObsRunEvent)) == 2
+	})
+}
