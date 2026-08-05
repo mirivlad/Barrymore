@@ -88,6 +88,8 @@ const SAY = {
   preparing: "готовится", running: "выполняется", awaiting_user: "ждёт вас",
   verifying: "проверяется", completed: "выполнено", failed: "не вышло",
   cancelled: "отменено",
+  // запуски
+  starting: "запускается", exited: "завершился", orphaned: "потерян",
   // проверки, ожидания, расхождения
   passed: "пройдена", skipped: "пропущена", pending: "в силе",
   satisfied: "сбылось", expired: "срок вышел", superseded: "заменено",
@@ -315,6 +317,17 @@ async function loadState() {
 }
 
 // Расхождения названы тем, что случилось, а не именем вида в коде.
+// Ожидания названы тем, чего Бэрримор ждёт, а не именем вида в коде.
+const EXPECTATION_LABEL = {
+  "worker_run.starts": "исполнитель запустится",
+  "worker_run.signal": "исполнитель подаёт признаки работы",
+  "worker_run.no_writes": "каталог не будет изменён",
+  "worker_run.report": "отчёт будет собран",
+  "worker_run.cost_policy": "списаний не будет",
+  "snapshot.fresh": "сведения останутся свежими",
+  "local_model.serving": "локальная модель отвечает",
+};
+
 const DISCREPANCY_LABEL = {
   "worker_run.starts": "исполнитель не запустился",
   "worker_run.signal": "исполнитель молчит",
@@ -969,7 +982,7 @@ window.openOrder = async (id) => {
       <div class="row">
         <h2 style="margin:0">${esc(o.title)}</h2>
         ${tag(o.state)}
-        ${o.audit_only ? tag("только чтение", "ok") : tag("с записью", "warn")}
+        ${o.audit_only ? tag("только чтение", "ok") : tag("с записью в копию", "warn")}
         <span class="grow"></span>
         ${
           o.state === "approved"
@@ -1017,9 +1030,11 @@ window.openOrder = async (id) => {
       ${
         (d.expectations || []).length
           ? `<ul class="plain">${d.expectations.map((e) => `
-              <li><div class="row">${tag(e.status)} <strong>${esc(e.kind)}</strong>
+              <li><div class="row">${tag(e.status)}
+              <strong>${esc(EXPECTATION_LABEL[e.kind] || e.kind)}</strong>
+              ${techNote(`· ${esc(e.kind)}`)}
               <span class="grow"></span>
-              <span class="muted">важность при нарушении: ${esc(e.severity_if_missed)}</span></div>
+              <span class="muted">если не сбудется — ${esc(say(e.severity_if_missed))}</span></div>
               <div class="muted">${esc(e.basis)}</div></li>`).join("")}</ul>`
           : `<p class="muted">ожиданий нет</p>`
       }
