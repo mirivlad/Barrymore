@@ -173,6 +173,34 @@ func (h *harness) approveAndStart(t *testing.T, p delegation.Proposal) delegatio
 	if err != nil {
 		t.Fatalf("запуск: %v", err)
 	}
+	// Процесс останавливается явно. Раньше его убивал `--die-with-parent`,
+	// но запуски теперь переживают смерть Бэрримора (сценарий H) — и тест,
+	// полагавшийся на побочный эффект, оставлял бы процесс-сироту.
+	//
+	// Уборка ждёт, пока запуск действительно завершится: горутина ожидания
+	// дописывает наблюдения, и уйти раньше неё значило бы дать ей обратиться
+	// к уже закрытой базе.
+	t.Cleanup(func() {
+		id := runner.ProcessIdentity{
+			UnitName: run.UnitName, PID: run.PID, StartTicks: run.PIDStartTicks,
+		}
+		_ = runner.Terminate(h.deleg.Runner().Capabilities(), id, true)
+		// Ждём терминального состояния поручения, а не просто ухода запуска
+		// из активных: приёмка идёт уже после отметки о завершении и сама
+		// обходит рабочий каталог, который вот-вот удалят.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			o, err := h.deleg.Get(context.Background(), p.Order.ID)
+			if err != nil {
+				return
+			}
+			switch o.State {
+			case delegation.StateCompleted, delegation.StateFailed, delegation.StateCancelled:
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
 	return run
 }
 

@@ -321,6 +321,9 @@ func TestDetachAndReattachResumesWithoutDuplicates(t *testing.T) {
 		t.Fatalf("запуск: %v", err)
 	}
 	runner.RememberIdentity("run_reattach", res.Identity)
+	// Останов явный: запуски переживают смерть родителя (сценарий H), поэтому
+	// полагаться на это как на уборку больше нельзя.
+	t.Cleanup(func() { _ = runner.Terminate(r.Capabilities(), res.Identity, true) })
 
 	waitFor(t, "первое событие прочитано", func() bool {
 		return len(observationsOf(t, rt, "run_reattach", runtime.ObsRunEvent)) == 1
