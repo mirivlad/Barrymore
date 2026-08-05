@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mirivlad/barrymore/internal/conversation"
 	"github.com/mirivlad/barrymore/internal/event"
@@ -384,5 +385,48 @@ func TestUnknownConversationIsNotFound(t *testing.T) {
 	_, err := h.talk.Send(context.Background(), "conv_нет", "привет")
 	if !errors.Is(err, conversation.ErrNotFound) {
 		t.Fatalf("ошибка %v, ожидалась ErrNotFound", err)
+	}
+}
+
+// Промпт не должен противоречить сам себе. «Всё, что ты делаешь, —
+// предложения» спорило с правилом памяти ниже, и Бэрримор в разговоре
+// утверждал, что не записывает ничего без подтверждения, — хотя записывал.
+func TestPromptStatesMemoryRuleOfTheActualPolicy(t *testing.T) {
+	cases := []struct {
+		mode   string
+		expect string
+	}{
+		{memory.ModeAsk, "Ничего не записывай сам"},
+		{memory.ModeAutoSafe, "записываешь сам"},
+		{memory.ModeAuto, "записываешь сам"},
+	}
+	for _, tc := range cases {
+		pol, err := memory.ParsePolicy(tc.mode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := conversation.DefaultIdentity()
+		id.MemoryRule = pol.Rule()
+		prompt := id.SystemPrompt(nil, time.Now())
+
+		if !strings.Contains(prompt, tc.expect) {
+			t.Errorf("режим %s: в промпте нет %q", tc.mode, tc.expect)
+		}
+		if strings.Contains(prompt, "Ты не выполняешь действий сам") {
+			t.Errorf("режим %s: осталось утверждение, противоречащее правилу памяти", tc.mode)
+		}
+	}
+}
+
+// О надзоре за моделью Бэрримор говорит только тогда, когда действительно
+// её ведёт: с облачным провайдером это было бы неправдой.
+func TestPromptMentionsModelSupervisionOnlyWhenTrue(t *testing.T) {
+	id := conversation.DefaultIdentity()
+	if strings.Contains(id.SystemPrompt(nil, time.Now()), "сервер модели ты держишь сам") {
+		t.Fatal("Бэрримор приписывает себе надзор, которого нет")
+	}
+	id.KeepsOwnModel = true
+	if !strings.Contains(id.SystemPrompt(nil, time.Now()), "сервер модели ты держишь сам") {
+		t.Fatal("Бэрримор умалчивает о том, что ведёт модель сам")
 	}
 }

@@ -189,6 +189,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 	identity := conversation.DefaultIdentity()
 	identity.KeepsOwnModel = a.LocalModel.Enabled()
+	identity.MemoryRule = a.Memory.Policy().Rule()
 	a.Talk = conversation.New(conversation.Config{
 		DB: db, Journal: a.Journal, Clock: cfg.Clock, Provider: provider,
 		Threads: a.Threads, Memory: a.Memory, Runtime: a.Runtime, Logger: cfg.Logger,
