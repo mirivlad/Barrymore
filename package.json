@@ -1,0 +1,12 @@
+{
+  "name": "barrymore-e2e",
+  "private": true,
+  "type": "module",
+  "description": "E2E-проверка интерфейса Бэрримора. Продукт на Go; node нужен только здесь.",
+  "scripts": {
+    "e2e": "node e2e/reception.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.55"
+  }
+}

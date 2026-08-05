@@ -14,7 +14,7 @@ LOCAL_MODEL ?= $(CURDIR)/data/local_models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
 MODEL_FLAGS ?= -local-model-threads 14 -local-model-gpu-layers 99 -local-model-cpu-moe 40
 
 .PHONY: help build test test-race vet fmt lint run run-quiet dev install uninstall \
-        clean host-audit rebuild ci
+        clean host-audit rebuild ci e2e
 
 help: ## Показать список целей
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -36,6 +36,11 @@ fmt: ## Форматирование
 	gofmt -l -w ./cmd ./internal
 
 lint: fmt vet ## Форматирование и проверки
+
+e2e: build ## Проверить интерфейс настоящим браузером
+	@command -v node >/dev/null || { echo "нужен node"; exit 1; }
+	@test -d node_modules/playwright || npm install --no-save --no-audit --no-fund playwright
+	node e2e/reception.mjs
 
 ci: lint test-race build ## Локальный CI
 

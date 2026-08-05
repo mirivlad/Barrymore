@@ -38,3 +38,11 @@ jobs:
 
       - name: Разбор интерфейса
         run: node --check internal/api/web/app.js
+
+      # Браузерная проверка проходит и без исполнителей на машине: часть про
+      # поручение честно пропускается, а не считается пройденной молча.
+      - name: Интерфейс в настоящем браузере
+        run: |
+          npm install --no-save --no-audit --no-fund playwright
+          npx playwright install --with-deps chromium
+          node e2e/reception.mjs

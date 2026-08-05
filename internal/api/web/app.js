@@ -427,6 +427,13 @@ const KIND_LABEL = {
 // идентификатором: связь между «Аудит mirvmon» и «thr_06fw…» читается по-разному.
 const threadTitles = new Map();
 
+// threadLine — одна строка о нити. Цель важнее происхождения: «чего мы хотим»
+// отвечает на вопрос владельца, а «почему нить появилась» — на вопрос историка.
+function threadLine(t) {
+  const text = t.canon?.goal || t.canon?.situation || t.origin || t.summary;
+  return text ? `<div class="muted" style="margin-top:3px">${esc(text)}</div>` : "";
+}
+
 function threadRow(t) {
   return `
     <div class="card thread-row clickable" onclick="openThread('${esc(t.id)}')">
@@ -436,8 +443,7 @@ function threadRow(t) {
         <span class="muted">${esc(KIND_LABEL[t.kind] || t.kind)}</span>
         ${techNote(`· ${esc(t.id)} · рев. ${t.revision}`)}
       </div>
-      ${t.summary ? `<div class="muted" style="margin-top:3px">${esc(t.summary)}</div>`
-        : t.origin ? `<div class="muted" style="margin-top:3px">${esc(t.origin)}</div>` : ""}
+      ${threadLine(t)}
       <div class="muted" style="margin-top:3px">
         последнее движение ${ago(t.last_meaningful_activity_at || t.updated_at)}
       </div>
@@ -575,7 +581,6 @@ window.openThread = async (id) => {
         ${techNote(`· ${esc(t.id)} · рев. ${t.revision}`)}
       </div>
       ${canonBlock(t.canon || {}, t.id)}
-      ${t.summary ? `<p style="margin:10px 0 0">${esc(t.summary)}</p>` : ""}
       ${t.origin ? `<p class="muted" style="margin:6px 0 0">почему появилась: ${esc(t.origin)}</p>` : ""}
       ${t.released_reason ? `<p class="muted" style="margin:6px 0 0">отпущена: ${esc(t.released_reason)}</p>` : ""}
       <div class="muted" style="margin-top:6px">
@@ -1714,7 +1719,10 @@ function renderProposals(turn) {
         : ""
     }
     ${
-      questions.length
+      // Открытые вопросы, попавшие в нить, уже видны в её карточке выше.
+      // Показать их и здесь значило бы предложить владельцу прочитать
+      // одно и то же дважды.
+      questions.length && !th.thread_id
         ? `<div style="margin-top:12px"><strong style="font-size:13px">Открытые вопросы</strong>
            <ul class="plain">${questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ul></div>`
         : ""
