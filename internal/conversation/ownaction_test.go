@@ -139,3 +139,30 @@ func TestDuplicateOwnActionsCollapse(t *testing.T) {
 }
 
 var _ conversation.SkillCatalog = stubCatalog{}
+
+// Найдено живьём: на вопрос «сколько свободного места» модель ответила
+// выдуманным числом — 18.4 ГБ из 238.5 — вместо того чтобы посмотреть.
+// Владелец сверил с `df -h` и увидел совсем другое.
+//
+// Правило не проверить кодом: свободный текст ответа валидировать нельзя.
+// Но убедиться, что оно вообще сказано модели, — можно и нужно.
+func TestModelIsForbiddenToInventFactsAboutTheMachine(t *testing.T) {
+	ctx := context.Background()
+	h := newHarnessWithSkills(t, memory.DefaultPolicy(), catalog)
+	h.prov.reply = reply("Понял.", nil)
+
+	c := h.conversation(t, "")
+	if _, err := h.talk.Send(ctx, c.ID, "сколько свободного места?"); err != nil {
+		t.Fatal(err)
+	}
+	system := h.prov.lastReq.System
+	for _, must := range []string{
+		"не называешь ни одной цифры",
+		"Выдуманное число хуже отказа",
+		"сказанное без проверки",
+	} {
+		if !strings.Contains(system, must) {
+			t.Fatalf("модели не сказано главное: нет фразы %q", must)
+		}
+	}
+}

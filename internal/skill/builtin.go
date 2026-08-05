@@ -71,16 +71,18 @@ func Builtin() []Skill {
 			Summarize: summarizeHolders,
 		},
 		{
-			ID:          SkillFreeSpace,
-			Title:       "проверить свободное место",
-			Question:    "хватает ли места на разделе с этим каталогом",
-			NeedsTarget: true,
+			ID:    SkillFreeSpace,
+			Title: "проверить свободное место на дисках",
+			Question: "сколько свободного места на дисках и не кончается ли оно " +
+				"где-нибудь",
+			NeedsTarget: false,
 			Origin:      OriginBuiltin,
 			Enabled:     true,
 			Steps: []Step{
 				{Primitive: PrimHostFreeSpace, Args: map[string]string{"path": Target},
-					Why: "измерить свободное место"},
+					Why: "измерить свободное место по всем файловым системам"},
 			},
+			Summarize: summarizeSpace,
 		},
 	}
 }
@@ -144,6 +146,25 @@ func summarizeSurvey(steps []StepResult) string {
 	}
 	return fmt.Sprintf("Репозиторий на ветке %s, файлов %s, %s.",
 		nonEmpty(branch, "без имени"), files, state)
+}
+
+// summarizeSpace называет самое узкое место, а не среднее по больнице.
+func summarizeSpace(steps []StepResult) string {
+	free := signal(steps, PrimHostFreeSpace, "free_pct")
+	where := signal(steps, PrimHostFreeSpace, "tightest")
+	n := num(signal(steps, PrimHostFreeSpace, "mounts"))
+	if where == "" {
+		return ""
+	}
+	pct := num(free)
+	tone := "места хватает"
+	if pct < 10 {
+		tone = "места почти нет"
+	} else if pct < 20 {
+		tone = "места остаётся немного"
+	}
+	return fmt.Sprintf("Проверил %d файловых систем: %s. Теснее всего на %s — "+
+		"свободно %d%%. Подробности ниже.", n, tone, where, pct)
 }
 
 func summarizeHolders(steps []StepResult) string {

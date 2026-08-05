@@ -56,6 +56,10 @@ type Arg struct {
 	Name string `json:"name"`
 	Kind string `json:"kind"`
 	Why  string `json:"why,omitempty"`
+	// Optional разрешает не задавать аргумент вовсе. Примитив обязан вести
+	// себя осмысленно и без него: «свободное место где угодно» — такой же
+	// законный вопрос, как «свободное место здесь».
+	Optional bool `json:"optional,omitempty"`
 }
 
 // Args — значения аргументов.

@@ -214,6 +214,35 @@ func TestSkillOnPlainDirectorySaysSoWithoutFailing(t *testing.T) {
 	}
 }
 
+// Владелец спросил «сколько свободного места», модель ответила выдуманным
+// числом — потому что умение требовало каталог и на общий вопрос его не звали.
+// Теперь умение отвечает на тот же вопрос, что и `df -h`, и каталога не просит.
+func TestFreeSpaceAnswersWithoutATarget(t *testing.T) {
+	h := newHarness(t, openPolicy{})
+	run, err := h.svc.Apply(context.Background(), skill.Request{SkillID: skill.SkillFreeSpace})
+	if err != nil {
+		t.Fatalf("умение потребовало каталог там, где его не бывает: %v", err)
+	}
+	if run.Status != skill.StatusDone {
+		t.Fatalf("не сработало: %+v", run)
+	}
+	if len(run.Steps[0].Facts) == 0 {
+		t.Fatal("ни одна файловая система не названа")
+	}
+	// Ответ должен указывать на самое узкое место, а не усреднять.
+	if !strings.Contains(run.Answer, "Теснее всего") {
+		t.Fatalf("ответ не называет, где место кончается: %q", run.Answer)
+	}
+	// Псевдофайловые системы — шум, в котором тонет настоящий ответ.
+	for _, f := range run.Steps[0].Facts {
+		for _, noise := range []string{"/proc ", "/sys ", "/dev "} {
+			if strings.HasPrefix(f.Text, noise) {
+				t.Fatalf("в ответе служебная файловая система: %q", f.Text)
+			}
+		}
+	}
+}
+
 // --- след в журнале ---
 
 func TestRunIsRecordedAndReadableBack(t *testing.T) {

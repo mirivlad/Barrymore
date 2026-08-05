@@ -358,7 +358,7 @@ func resolveArgs(p Primitive, st Step, target string) (Args, error) {
 	for _, a := range p.Args {
 		v := st.Args[a.Name]
 		if v == Target {
-			if target == "" {
+			if target == "" && !a.Optional {
 				return nil, fmt.Errorf("шагу нужен каталог, а он не задан")
 			}
 			v = target
@@ -366,6 +366,9 @@ func resolveArgs(p Primitive, st Step, target string) (Args, error) {
 		switch a.Kind {
 		case ArgPath:
 			if v == "" {
+				if a.Optional {
+					continue
+				}
 				return nil, fmt.Errorf("шагу нужен каталог")
 			}
 			if !filepath.IsAbs(v) {

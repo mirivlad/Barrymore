@@ -1954,12 +1954,19 @@ window.undoCanon = async (threadID) => {
 
 // ---------- реплики ----------
 
+// modelName сокращает модель до имени. Полный путь к весам в подписи реплики
+// не сообщает ничего, кроме того, что кто-то поленился его сократить.
+function modelName(v) {
+  const base = String(v).split("/").pop();
+  return base.replace(/\.gguf$/i, "");
+}
+
 function bubble(m) {
   const who = m.role === "person" ? "Вы" : "Бэрримор";
   // Модель, задержка и токены — не часть разговора. В обычном режиме их
   // не видно вовсе; след извлечения объясняет, почему ответ получился таким.
   const meta = [];
-  if (m.model) meta.push(esc(m.model));
+  if (m.model) meta.push(esc(modelName(m.model)));
   if (m.latency_ms) meta.push(`${Math.round(m.latency_ms / 1000)} с`);
   if (m.output_tokens) meta.push(`${m.prompt_tokens}+${m.output_tokens} токенов`);
   const trace = (m.retrieval_trace || []).length
@@ -1973,8 +1980,13 @@ function bubble(m) {
 
 // restore=false нужен, когда следом всё равно пересобирается сайдбар:
 // два подряд обновления подряд дают заметный мигающий скачок.
+//
+// Пока идёт ответ, чат не перерисовывается вовсе. Найдено живьём: владелец
+// задал вопрос, переключился на «Нити», вернулся — и увидел пустой экран,
+// будто спросил в пустоту. Перерисовка стирала и его реплику, и «Бэрримор
+// думает», а ответ приходил через минуту как ни в чём не бывало.
 async function loadChat(restore = true) {
-  if (!currentConversation) return;
+  if (!currentConversation || sending) return;
   try {
     const d = await api(`/api/v1/conversations/${currentConversation}/messages`);
     const items = d.items || [];
@@ -2083,12 +2095,17 @@ async function send() {
     const el = document.getElementById("thinking");
     if (el) el.textContent = `Бэрримор думает… ${Math.round((Date.now() - started) / 1000)} с`;
   }, 1000);
+  // Уходя с вкладки, владелец не должен терять ответ. Секундомер идёт дальше,
+  // и по возвращении видно то же, что и было.
 
   try {
     const turn = await api(`/api/v1/conversations/${currentConversation}/messages`, {
       method: "POST", body: JSON.stringify({ text }),
     });
     clearInterval(timer);
+    // Ожидание кончилось раньше, чем разбор ответа: иначе перерисовка чата
+    // сама себя и запретила бы.
+    sending = false;
     await loadChat(false);
     takeTurn(turn);
     await loadThreadState();
@@ -2096,6 +2113,7 @@ async function send() {
     loadMemory();
   } catch (err) {
     clearInterval(timer);
+    sending = false;
     const el = document.getElementById("thinking");
     if (el) el.outerHTML = `<div class="bubble barrymore"><span class="tag bad">не отвечено</span>
       <div style="margin-top:6px">${esc(err.message)}</div></div>`;

@@ -61,8 +61,11 @@ func Primitives() []Primitive {
 		},
 		{
 			ID: PrimHostFreeSpace, Title: "проверить свободное место",
-			Args: []Arg{{Name: "path", Kind: ArgPath, Why: "на каком разделе"}},
-			Run:  hostFreeSpace,
+			Args: []Arg{{
+				Name: "path", Kind: ArgPath, Optional: true,
+				Why: "на каком разделе; без него — по всем",
+			}},
+			Run: hostFreeSpace,
 		},
 	}
 }
@@ -371,22 +374,105 @@ func procHolders(ctx context.Context, in Args) (Observation, error) {
 	return obs, nil
 }
 
+// pseudoFS — файловые системы, которые не занимают места на диске.
+//
+// Показывать владельцу, что в `/dev` свободно 16 ГБ, — не ответ на вопрос
+// «сколько места на диске», а шум, в котором тонет настоящий ответ.
+var pseudoFS = map[string]bool{
+	"proc": true, "sysfs": true, "devtmpfs": true, "devpts": true,
+	"cgroup": true, "cgroup2": true, "securityfs": true, "pstore": true,
+	"bpf": true, "debugfs": true, "tracefs": true, "configfs": true,
+	"fusectl": true, "mqueue": true, "hugetlbfs": true, "efivarfs": true,
+	"autofs": true, "binfmt_misc": true, "ramfs": true, "squashfs": true,
+	"nsfs": true, "overlay": true, "tmpfs": true,
+}
+
+// hostFreeSpace отвечает на тот же вопрос, что и `df -h`.
+//
+// Без каталога перечисляются все настоящие файловые системы: владелец
+// спрашивает «сколько места на диске», а не «сколько на разделе с этим
+// путём». Раньше умение требовало каталог — и на общий вопрос его просто
+// не звали, а модель отвечала выдуманным числом.
 func hostFreeSpace(_ context.Context, in Args) (Observation, error) {
+	if p := in["path"]; p != "" {
+		free, total, err := space(p)
+		if err != nil {
+			return Observation{}, err
+		}
+		return Observation{
+			Facts:   []Fact{{Text: describeSpace(p, free, total)}},
+			Signals: map[string]string{"free_pct": strconv.Itoa(percent(free, total))},
+		}, nil
+	}
+
+	mounts, err := realMounts()
+	if err != nil {
+		return Observation{}, err
+	}
+	obs := Observation{Signals: map[string]string{}}
+	var tightest = 101
+	for _, m := range mounts {
+		free, total, err := space(m)
+		if err != nil || total == 0 {
+			continue
+		}
+		obs.Facts = append(obs.Facts, Fact{Text: describeSpace(m, free, total)})
+		if p := percent(free, total); p < tightest {
+			tightest = p
+			obs.Signals["tightest"] = m
+		}
+	}
+	if len(obs.Facts) == 0 {
+		return Observation{}, fmt.Errorf("ни одна файловая система не опрошена")
+	}
+	obs.Signals["free_pct"] = strconv.Itoa(tightest)
+	obs.Signals["mounts"] = strconv.Itoa(len(obs.Facts))
+	return obs, nil
+}
+
+func space(path string) (free, total int64, err error) {
 	var st syscall.Statfs_t
-	if err := syscall.Statfs(in["path"], &st); err != nil {
-		return Observation{}, fmt.Errorf("раздел недоступен: %w", err)
+	if err := syscall.Statfs(path, &st); err != nil {
+		return 0, 0, fmt.Errorf("раздел %s недоступен: %w", path, err)
 	}
-	free := int64(st.Bavail) * st.Bsize
-	total := int64(st.Blocks) * st.Bsize
-	pct := 0
-	if total > 0 {
-		pct = int(free * 100 / total)
+	return int64(st.Bavail) * st.Bsize, int64(st.Blocks) * st.Bsize, nil
+}
+
+func percent(free, total int64) int {
+	if total <= 0 {
+		return 0
 	}
-	return Observation{
-		Facts: []Fact{{Text: fmt.Sprintf("свободно %s из %s (%d%%)",
-			humanBytes(free), humanBytes(total), pct)}},
-		Signals: map[string]string{"free_pct": strconv.Itoa(pct)},
-	}, nil
+	return int(free * 100 / total)
+}
+
+func describeSpace(mount string, free, total int64) string {
+	return fmt.Sprintf("%s — свободно %s из %s (%d%% свободно)",
+		mount, humanBytes(free), humanBytes(total), percent(free, total))
+}
+
+// realMounts читает /proc/self/mounts и оставляет то, что занимает диск.
+func realMounts() ([]string, error) {
+	data, err := os.ReadFile("/proc/self/mounts")
+	if err != nil {
+		return nil, fmt.Errorf("перечень файловых систем недоступен: %w", err)
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || pseudoFS[f[2]] {
+			continue
+		}
+		// Пробелы в точке монтирования экранируются восьмеричным \040.
+		mount := strings.ReplaceAll(f[1], `\040`, " ")
+		if seen[mount] {
+			continue
+		}
+		seen[mount] = true
+		out = append(out, mount)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func under(path, root string) bool {

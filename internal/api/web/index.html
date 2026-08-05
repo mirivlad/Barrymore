@@ -189,15 +189,19 @@
 
   /* Кнопка со счётчиком — единственное, что видно от сайдбара в закрытом виде. */
   .affairs-toggle {
-    background: none; border: 1px solid var(--line); color: var(--muted);
-    border-radius: 999px; padding: 4px 12px; font: inherit; font-size: 13px;
-    cursor: pointer; display: inline-flex; align-items: center; gap: 7px;
+    background: var(--panel); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 999px; padding: 5px 8px 5px 14px; font: inherit; font-size: 13px;
+    cursor: pointer; display: inline-flex; align-items: center; gap: 8px;
     white-space: nowrap;
   }
-  .affairs-toggle:hover { color: var(--ink); border-color: var(--accent); }
+  .affairs-toggle:hover { border-color: var(--accent); }
+  .affairs-toggle::after {
+    content: "›"; color: var(--muted); font-size: 15px; line-height: 1;
+  }
+  body.affairs-open .affairs-toggle::after { content: "‹"; }
   .affairs-toggle .count {
     background: var(--line); color: var(--ink); border-radius: 999px;
-    padding: 0 7px; font-size: 12px; min-width: 20px; text-align: center;
+    padding: 0 8px; font-size: 12px; min-width: 22px; text-align: center;
   }
   .affairs-toggle.hot .count { background: var(--bad); color: var(--bg); }
   .affairs-toggle.warm .count { background: var(--warn); color: var(--bg); }
@@ -225,6 +229,14 @@
   .affair-which { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
   .affair-body { font-size: 13px; padding-bottom: 10px; }
   .affair-body .row { margin-top: 8px; }
+
+  /* Карточка внутри списка остаётся карточкой. Правило `ul.plain li` было
+     сильнее по специфичности и съедало у неё боковые поля, добавляя сверху
+     чужую линию: исполнители выпадали из общей сетки и раздел выглядел
+     сломанным. */
+  ul.plain > li.card { padding: 14px 16px; border-top: none; }
+  .worker-list { margin-top: 12px; }
+  .worker-list li.card > .row:first-child { row-gap: 4px; }
   .affair-body button.act, .affair-body button.ghost { padding: 5px 10px; font-size: 13px; }
 
   details > summary { cursor: pointer; }
@@ -422,8 +434,12 @@
         Обнаружение опрашивает версии и не выполняет платных запросов.
         Состояние квоты локально не наблюдается и честно показывается как неизвестное.
       </p>
-    </div>
-    <ul class="plain" id="workers"><li class="muted">нажмите «Обнаружить исполнителей»</li></ul>
+      <!-- Исполнители лежат внутри той же карточки, что и заголовок раздела.
+           Списком наружу они выпадали из сетки: другая ширина, нет полей,
+           строки встык — раздел выглядел сломанным. -->
+      <ul class="plain worker-list" id="workers">
+        <li class="muted">нажмите «Обнаружить исполнителей»</li>
+      </ul>
   </section>
 
   <section id="tab-orders" hidden>
