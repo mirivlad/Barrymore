@@ -109,6 +109,86 @@ func ValidateLinkKind(kind string) error {
 	return nil
 }
 
+// Источники канонического состояния. От источника зависит доверие к записи.
+const (
+	// CanonFromTalk — состояние сформулировано в разговоре.
+	CanonFromTalk = "разговор"
+	// CanonFromOrder — состояние следует из завершившегося поручения.
+	CanonFromOrder = "поручение"
+	// CanonFromPerson — владелец поправил вручную.
+	CanonFromPerson = "владелец"
+)
+
+// Canon — каноническое состояние нити.
+//
+// Не пересказ переписки: пересказ восстанавливается из сообщений и потому
+// каноническим быть не может (01_PRODUCT_BOUNDARY §2.2). Здесь то, что
+// Бэрримор утверждает о нити и за что отвечает.
+//
+// Позиции сторон, решения и открытые вопросы сюда не дублируются: у них
+// собственные сущности со своей историей. Второе место для того же самого
+// означало бы два ответа на один вопрос.
+type Canon struct {
+	// Goal — чего мы хотим.
+	Goal string `json:"goal,omitempty"`
+	// Situation — где остановились.
+	Situation string `json:"situation,omitempty"`
+	// NextStep — какой шаг следующий.
+	NextStep string `json:"next_step,omitempty"`
+	// Obstacles — что мешает двигаться.
+	Obstacles []string `json:"obstacles,omitempty"`
+	// Waiting — чего ждём: чужого ответа, результата поручения, события.
+	Waiting []string `json:"waiting,omitempty"`
+	// Source говорит, откуда взялась запись. Запись после поручения и запись
+	// со слов владельца имеют разный вес, и скрывать разницу нельзя.
+	Source    string     `json:"source,omitempty"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+// Empty сообщает, что о нити пока ничего не утверждается.
+func (c Canon) Empty() bool {
+	return c.Goal == "" && c.Situation == "" && c.NextStep == "" &&
+		len(c.Obstacles) == 0 && len(c.Waiting) == 0
+}
+
+// CanonPatch — изменение канонического состояния.
+//
+// Nil-поле означает «не трогать»: поручение уточняет, где мы остановились,
+// и не имеет права переписать цель, о которой договаривались люди.
+type CanonPatch struct {
+	Goal      *string   `json:"goal,omitempty"`
+	Situation *string   `json:"situation,omitempty"`
+	NextStep  *string   `json:"next_step,omitempty"`
+	Obstacles *[]string `json:"obstacles,omitempty"`
+	Waiting   *[]string `json:"waiting,omitempty"`
+}
+
+// Empty сообщает, что менять нечего.
+func (p CanonPatch) Empty() bool {
+	return p.Goal == nil && p.Situation == nil && p.NextStep == nil &&
+		p.Obstacles == nil && p.Waiting == nil
+}
+
+// Apply накладывает изменение на состояние.
+func (p CanonPatch) Apply(c Canon) Canon {
+	if p.Goal != nil {
+		c.Goal = *p.Goal
+	}
+	if p.Situation != nil {
+		c.Situation = *p.Situation
+	}
+	if p.NextStep != nil {
+		c.NextStep = *p.NextStep
+	}
+	if p.Obstacles != nil {
+		c.Obstacles = *p.Obstacles
+	}
+	if p.Waiting != nil {
+		c.Waiting = *p.Waiting
+	}
+	return c
+}
+
 // Thread — каноническая долгоживущая линия.
 type Thread struct {
 	ID                       string     `json:"id"`
@@ -126,6 +206,8 @@ type Thread struct {
 	NextReviewAt             *time.Time `json:"next_review_at,omitempty"`
 	MutedUntil               *time.Time `json:"muted_until,omitempty"`
 	ReleasedReason           string     `json:"released_reason,omitempty"`
+	// Canon — то, что Бэрримор утверждает о нити прямо сейчас.
+	Canon Canon `json:"canon"`
 	// Revision — ревизия потока событий нити, основа оптимистичной конкурентности.
 	Revision int64 `json:"revision"`
 }
@@ -199,6 +281,8 @@ const (
 	EvQuestionClosed   = "thread.question.closed"
 	EvLinked           = "thread.linked"
 	EvReleased         = "thread.released"
+	// EvCanonUpdated — изменилось каноническое состояние нити.
+	EvCanonUpdated = "thread.canon.updated"
 )
 
 // StreamType — тип потока событий нити.

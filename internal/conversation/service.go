@@ -154,7 +154,7 @@ func (s *Service) Send(ctx context.Context, conversationID, text string) (Turn, 
 		return Turn{}, err
 	}
 
-	sections, trace, err := s.buildContext(ctx, conv)
+	sections, trace, offered, err := s.buildContext(ctx, conv)
 	if err != nil {
 		return Turn{}, err
 	}
@@ -198,6 +198,10 @@ func (s *Service) Send(ctx context.Context, conversationID, text string) (Turn, 
 
 	turn := Turn{UserMessage: userMsg, Reply: replyMsg, Proposal: proposal}
 
+	// Нить определяется до всего остального: позиция, открытые вопросы и
+	// состояние принадлежат ей, и без неё им негде оказаться.
+	turn.Thread = s.settleThread(ctx, &conv, proposal, offered)
+
 	// Предложения превращаются в видимых кандидатов. Ничего не записывается
 	// в память молча (00_PRODUCT_VISION §9.2).
 	for _, mc := range proposal.MemoryCandidates {
@@ -232,6 +236,17 @@ func (s *Service) Send(ctx context.Context, conversationID, text string) (Turn, 
 			Actor:      event.Actor{Type: event.ActorBarrymore},
 		}); err != nil {
 			s.log.Error("позиция по нити не записана", "thread", conv.ThreadID, "error", err)
+		}
+	}
+
+	// Каноническое состояние нити ведёт Бэрримор, а не владелец: если бы
+	// его надо было заполнять руками, нить снова стала бы карточкой проекта.
+	if proposal.ThreadState != nil && conv.ThreadID != "" && !proposal.ThreadState.Empty() {
+		if _, err := s.threads.SetCanon(ctx, conv.ThreadID,
+			patchFromProposal(*proposal.ThreadState),
+			thread.CanonFromTalk, "по итогам разговора",
+			event.Actor{Type: event.ActorBarrymore}); err != nil {
+			s.log.Error("состояние нити не записано", "thread", conv.ThreadID, "error", err)
 		}
 	}
 
@@ -301,32 +316,96 @@ func (s *Service) recordProposal(ctx context.Context, conv Conversation, message
 		_, err := w.Append(ctx, event.Request{
 			StreamType: StreamType, StreamID: conv.ID, ExpectedRevision: event.AnyRevision,
 			EventType: EvProposalReceived, Actor: event.Actor{Type: event.ActorBarrymore},
-			Payload: map[string]any{"message_id": messageID, "proposal": p},
+			Payload: proposalPayload{MessageID: messageID, Proposal: p},
 		})
 		return err
 	})
 	return err
 }
 
-// buildContext собирает разделы контекста и след извлечения.
+// LastProposalMessage возвращает реплику, к которой относится последнее
+// предложение. Без неё восстановленное предложение не на что сослаться.
+func (s *Service) LastProposalMessage(ctx context.Context, conversationID string) (string, error) {
+	envs, err := s.journal.Stream(ctx, StreamType, conversationID)
+	if err != nil {
+		return "", err
+	}
+	out := ""
+	for _, env := range envs {
+		if env.EventType != EvProposalReceived {
+			continue
+		}
+		var p proposalPayload
+		if err := env.Decode(&p); err != nil {
+			return "", err
+		}
+		out = p.MessageID
+	}
+	return out, nil
+}
+
+// ProposalFor возвращает предложение, которое Бэрримор сделал в этом ходу.
+//
+// Читается из журнала, а не принимается от клиента. Разница принципиальна:
+// владелец подтверждает то, что Бэрримор действительно сказал, а не то, что
+// браузер прислал обратно под видом сказанного.
+//
+// Пустой messageID означает «последнее предложение разговора».
+func (s *Service) ProposalFor(ctx context.Context, conversationID, messageID string) (Proposal, error) {
+	envs, err := s.journal.Stream(ctx, StreamType, conversationID)
+	if err != nil {
+		return Proposal{}, err
+	}
+	var found *Proposal
+	for _, env := range envs {
+		if env.EventType != EvProposalReceived {
+			continue
+		}
+		var p proposalPayload
+		if err := env.Decode(&p); err != nil {
+			return Proposal{}, err
+		}
+		if messageID != "" && p.MessageID != messageID {
+			continue
+		}
+		proposal := p.Proposal
+		found = &proposal
+	}
+	if found == nil {
+		return Proposal{}, fmt.Errorf("%w: предложение в разговоре %s", ErrNotFound, conversationID)
+	}
+	return *found, nil
+}
+
+// buildContext собирает разделы контекста, след извлечения и список нитей,
+// среди которых модели позволено выбирать.
 //
 // Для каждого элемента сохраняется retrieval trace: владелец должен видеть,
 // что именно было подано модели (04_MEMORY_AND_CONTINUITY §7).
-func (s *Service) buildContext(ctx context.Context, conv Conversation) ([]ContextSection, []string, error) {
+//
+// Возвращаемый список нитей — не украшение ответа, а граница полномочий:
+// связать разговор можно только с тем, что было показано. Сослаться на нить,
+// которой не предлагали, значит сослаться на догадку.
+func (s *Service) buildContext(ctx context.Context, conv Conversation) (
+	[]ContextSection, []string, map[string]string, error) {
+
 	var sections []ContextSection
 	var trace []string
+	offered := map[string]string{}
 
 	if conv.ThreadID != "" {
 		d, err := s.threads.Detail(ctx, conv.ThreadID)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
+		offered[d.Thread.ID] = d.Thread.Title
 		var b strings.Builder
 		b.WriteString("Название: " + d.Thread.Title + "\n")
 		b.WriteString("Состояние: " + d.Thread.State + "\n")
 		if d.Thread.Origin != "" {
 			b.WriteString("Происхождение: " + d.Thread.Origin + "\n")
 		}
+		b.WriteString(describeCanon(d.Thread.Canon))
 		for _, pos := range d.Positions {
 			if pos.ValidUntil != nil {
 				continue
@@ -350,11 +429,48 @@ func (s *Service) buildContext(ctx context.Context, conv Conversation) ([]Contex
 		sections = append(sections, ContextSection{Title: "Текущая нить", Body: b.String()})
 		trace = append(trace, fmt.Sprintf("нить %s: позиций %d, решений %d, открытых вопросов %d",
 			d.Thread.ID, len(d.Positions), len(d.Decisions), open))
+	} else {
+		// Разговор ещё ни к чему не отнесён. Показываем живые нити, чтобы
+		// Бэрримор мог узнать среди них ту, о которой идёт речь, — иначе он
+		// вынужден предлагать новую всякий раз, и владелец получает
+		// десять нитей об одном и том же.
+		open, err := s.threads.List(ctx, thread.ListFilter{
+			States: []string{thread.StateActive, thread.StateMaturing,
+				thread.StateWaiting, thread.StateBlocked},
+			Limit: 25,
+		})
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		var b strings.Builder
+		for _, t := range open {
+			offered[t.ID] = t.Title
+			b.WriteString("- " + t.ID + " — " + t.Title)
+			if t.Canon.Goal != "" {
+				b.WriteString("; цель: " + t.Canon.Goal)
+			}
+			if t.Canon.Situation != "" {
+				b.WriteString("; где остановились: " + t.Canon.Situation)
+			}
+			b.WriteString("\n")
+		}
+		if len(open) == 0 {
+			// Пустоту приходится называть вслух. Молчание о том, что нитей нет,
+			// модель читает как отсутствие раздела, а не как отсутствие нитей,
+			// и выдумывает идентификатор вместо того, чтобы предложить новую.
+			// Проверено живьём: первая же реплика на чистой базе.
+			b.WriteString("Ни одной нити пока нет. Значит, thread_id обязан быть " +
+				"пустым: сослаться не на что.\n")
+		}
+		sections = append(sections, ContextSection{
+			Title: "Нити, которые уже есть", Body: b.String(),
+		})
+		trace = append(trace, fmt.Sprintf("нитей предложено к сопоставлению: %d", len(open)))
 	}
 
 	items, err := s.memory.Active(ctx, 40)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if len(items) > 0 {
 		var b strings.Builder
@@ -370,7 +486,7 @@ func (s *Service) buildContext(ctx context.Context, conv Conversation) ([]Contex
 	if s.rt != nil {
 		open, err := s.rt.Discrepancies(ctx, true, 10)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if len(open) > 0 {
 			var b strings.Builder
@@ -385,7 +501,28 @@ func (s *Service) buildContext(ctx context.Context, conv Conversation) ([]Contex
 		}
 	}
 
-	return sections, trace, nil
+	return sections, trace, offered, nil
+}
+
+// describeCanon переводит каноническое состояние нити в текст для модели.
+func describeCanon(c thread.Canon) string {
+	var b strings.Builder
+	if c.Goal != "" {
+		b.WriteString("Цель: " + c.Goal + "\n")
+	}
+	if c.Situation != "" {
+		b.WriteString("Где остановились: " + c.Situation + "\n")
+	}
+	for _, o := range c.Obstacles {
+		b.WriteString("Мешает: " + o + "\n")
+	}
+	for _, w := range c.Waiting {
+		b.WriteString("Ждём: " + w + "\n")
+	}
+	if c.NextStep != "" {
+		b.WriteString("Следующий шаг: " + c.NextStep + "\n")
+	}
+	return b.String()
 }
 
 // history возвращает последние реплики разговора для передачи модели.
@@ -410,6 +547,8 @@ func (s *Service) Projections(reg *projection.Registry) {
 	reg.Tables(ProjectionTables...)
 	reg.On(EvConversationStarted, projectConversation)
 	reg.On(EvMessageRecorded, projectMessage)
+	reg.On(EvThreadAttached, projectThreadLink)
+	reg.On(EvThreadDetached, projectThreadLink)
 	// Предложение — запись аудита: состояние меняют кандидаты и позиции,
 	// у которых собственные события.
 	reg.OnAudit(EvProposalReceived)

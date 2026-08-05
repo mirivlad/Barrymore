@@ -72,6 +72,40 @@ func projectUpdated(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
 	return applyUpdated(ctx, tx, p)
 }
 
+func applyCanon(ctx context.Context, tx *sql.Tx, p canonPayload) error {
+	obstacles, _ := json.Marshal(orEmptyStrings(p.Canon.Obstacles))
+	waiting, _ := json.Marshal(orEmptyStrings(p.Canon.Waiting))
+	_, err := tx.ExecContext(ctx, `
+		UPDATE threads
+		   SET canon_goal = ?, canon_situation = ?, canon_next_step = ?,
+		       canon_obstacles = ?, canon_waiting = ?, canon_source = ?,
+		       canon_updated_at = ?, updated_at = ?, revision = ?
+		 WHERE id = ?`,
+		p.Canon.Goal, p.Canon.Situation, p.Canon.NextStep,
+		string(obstacles), string(waiting), p.Canon.Source,
+		ts(p.At), ts(p.At), p.Revision, p.ID)
+	if err != nil {
+		return fmt.Errorf("проекция состояния нити %s: %w", p.ID, err)
+	}
+	return nil
+}
+
+func projectCanon(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
+	var p canonPayload
+	if err := env.Decode(&p); err != nil {
+		return err
+	}
+	p.Revision = env.StreamRevision
+	return applyCanon(ctx, tx, p)
+}
+
+func orEmptyStrings(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
+}
+
 func applyStateChange(ctx context.Context, tx *sql.Tx, p stateChangePayload) error {
 	released := ""
 	if p.State == StateReleased {
@@ -220,7 +254,9 @@ func projectLink(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
 const selectThreadColumns = `
 	SELECT id, title, kind, state, summary, origin, importance, sensitivity,
 	       COALESCE(workspace_id, ''), created_at, updated_at, last_meaningful_activity_at,
-	       next_review_at, muted_until, released_reason, revision
+	       next_review_at, muted_until, released_reason, revision,
+	       canon_goal, canon_situation, canon_next_step, canon_obstacles,
+	       canon_waiting, canon_source, canon_updated_at
 	FROM threads`
 
 type scanner interface{ Scan(dest ...any) error }
@@ -230,11 +266,24 @@ func scanThread(row scanner) (Thread, error) {
 		t                                    Thread
 		createdAt, updatedAt                 string
 		lastActivity, nextReview, mutedUntil sql.NullString
+		obstacles, waiting                   string
+		canonUpdated                         sql.NullString
 	)
 	err := row.Scan(&t.ID, &t.Title, &t.Kind, &t.State, &t.Summary, &t.Origin,
 		&t.Importance, &t.Sensitivity, &t.WorkspaceID, &createdAt, &updatedAt,
-		&lastActivity, &nextReview, &mutedUntil, &t.ReleasedReason, &t.Revision)
+		&lastActivity, &nextReview, &mutedUntil, &t.ReleasedReason, &t.Revision,
+		&t.Canon.Goal, &t.Canon.Situation, &t.Canon.NextStep, &obstacles,
+		&waiting, &t.Canon.Source, &canonUpdated)
 	if err != nil {
+		return Thread{}, err
+	}
+	if err := json.Unmarshal([]byte(obstacles), &t.Canon.Obstacles); err != nil {
+		return Thread{}, fmt.Errorf("препятствия нити %s: %w", t.ID, err)
+	}
+	if err := json.Unmarshal([]byte(waiting), &t.Canon.Waiting); err != nil {
+		return Thread{}, fmt.Errorf("ожидания нити %s: %w", t.ID, err)
+	}
+	if t.Canon.UpdatedAt, err = parseTSPtr(canonUpdated); err != nil {
 		return Thread{}, err
 	}
 	if t.CreatedAt, err = parseTS(createdAt); err != nil {

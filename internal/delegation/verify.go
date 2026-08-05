@@ -131,7 +131,16 @@ func (s *Service) Finalize(ctx context.Context, orderID, runID string) error {
 		state = StateFailed
 		reason = strings.Join(failures, "; ")
 	}
-	return s.setState(ctx, orderID, state, reason, event.Actor{Type: event.ActorRuntime})
+	if err := s.setState(ctx, orderID, state, reason, event.Actor{Type: event.ActorRuntime}); err != nil {
+		return err
+	}
+
+	// Нить узнаёт итог сама. Иначе владельцу пришлось бы переносить результат
+	// туда руками — то есть обслуживать связь, которую система знает и без него.
+	order.State = state
+	order.FailureReason = reason
+	s.reflectFinish(ctx, order, checks)
+	return nil
 }
 
 func (s *Service) diffAgainstBaseline(ctx context.Context, order WorkOrder, after WorkspaceState) Diff {

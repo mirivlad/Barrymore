@@ -185,11 +185,11 @@
     <div class="card welcome" id="welcome" hidden></div>
     <div class="card" id="notices" hidden></div>
     <div class="card" id="talk-provider"></div>
+    <div class="card" id="thread-state" hidden></div>
     <div class="card">
       <div class="row">
         <h2 style="margin:0">Разговор</h2>
         <span class="grow"></span>
-        <select id="talk-thread" style="max-width:260px"></select>
         <button class="ghost" id="talk-new">Новый разговор</button>
       </div>
       <div id="chat" class="chat"></div>
@@ -264,11 +264,12 @@
       <div class="row">
         <h2 style="margin:0">Нити</h2>
         <span class="grow"></span>
-        <button class="ghost" id="th-toggle-new">Завести нить</button>
+        <button class="ghost" id="th-toggle-new">Завести вручную</button>
       </div>
       <p class="muted" style="margin:8px 0 0">
-        Нить может не иметь срока и измеримого результата: идея, спор или сомнение —
-        полноценные нити.
+        Нити ведёт Бэрримор: он относит к ним разговоры и держит их состояние
+        в порядке. Здесь — обзор и правка. Нить может не иметь срока и измеримого
+        результата: идея, спор или сомнение — полноценные нити.
       </p>
     </div>
     <div id="threads-groups"><p class="muted">загрузка…</p></div>
@@ -311,8 +312,16 @@
 
   <section id="tab-orders" hidden>
     <div class="card">
-      <h2>Новое поручение</h2>
-      <div class="row">
+      <h2>Поручения</h2>
+      <ul class="plain" id="orders"><li class="muted">загрузка…</li></ul>
+    </div>
+    <div class="card" id="order-detail" hidden></div>
+    <details class="card">
+      <summary>Поручить вручную</summary>
+      <p class="muted" style="margin:8px 0 0">Обычно поручение предлагает сам
+        Бэрримор — прямо в разговоре, с уже заполненными целью, причиной и
+        каталогом. Эта форма нужна, когда проще задать всё самому.</p>
+      <div class="row" style="margin-top:10px">
         <div class="grow"><label for="wo-thread">Нить</label>
           <select id="wo-thread"></select></div>
         <div class="grow"><label for="wo-root">Рабочий каталог</label>
@@ -329,12 +338,7 @@
         в копии каталога, а изменения дойдут до вас только по вашему решению.
       </p>
       <div id="wo-candidates"></div>
-    </div>
-    <div class="card">
-      <h2>Поручения</h2>
-      <ul class="plain" id="orders"><li class="muted">загрузка…</li></ul>
-    </div>
-    <div class="card" id="order-detail" hidden></div>
+    </details>
   </section>
 
   <section id="tab-settings" hidden>

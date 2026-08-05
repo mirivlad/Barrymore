@@ -526,6 +526,9 @@ const LINK_LABEL = {
 
 const EVENT_LABEL = {
   "thread.created": "нить заведена",
+  "thread.canon.updated": "состояние нити обновлено",
+  "conversation.thread.attached": "разговор отнесён к нити",
+  "conversation.thread.detached": "разговор отвязан от нити",
   "thread.updated": "нить изменена",
   "thread.state.changed": "состояние изменилось",
   "thread.position.updated": "записана позиция",
@@ -571,6 +574,7 @@ window.openThread = async (id) => {
         ${group ? `<span class="muted">· ${esc(group.why)}</span>` : ""}
         ${techNote(`· ${esc(t.id)} · рев. ${t.revision}`)}
       </div>
+      ${canonBlock(t.canon || {}, t.id)}
       ${t.summary ? `<p style="margin:10px 0 0">${esc(t.summary)}</p>` : ""}
       ${t.origin ? `<p class="muted" style="margin:6px 0 0">почему появилась: ${esc(t.origin)}</p>` : ""}
       ${t.released_reason ? `<p class="muted" style="margin:6px 0 0">отпущена: ${esc(t.released_reason)}</p>` : ""}
@@ -1375,19 +1379,118 @@ async function loadTalk() {
     if (!currentConversation && items.length) currentConversation = items[0].id;
     if (currentConversation) await loadChat();
     else $("chat").innerHTML = `<div class="muted">Начните новый разговор.</div>`;
+    await loadThreadState();
     await loadWelcome(items.length);
     await loadNotices();
   } catch (err) {
     $("talk-provider").innerHTML = `<span class="tag bad">ошибка</span> ${esc(err.message)}`;
   }
-
-  try {
-    const t = await api("/api/v1/threads");
-    const select = $("talk-thread");
-    select.innerHTML = `<option value="">без нити</option>` +
-      (t.items || []).map((x) => `<option value="${esc(x.id)}">${esc(x.title)}</option>`).join("");
-  } catch { /* список нитей не критичен для разговора */ }
 }
+
+// ---------- нить разговора ----------
+
+// Нить показывается рядом с разговором, а не на другой вкладке.
+//
+// Смысл в том, чтобы владельцу не приходилось помнить, о чём шла речь в
+// прошлый раз, и не приходилось ходить за этим в другое место. Состояние
+// здесь — то, что Бэрримор утверждает о нити, а не пересказ переписки.
+async function loadThreadState() {
+  const box = $("thread-state");
+  if (!currentConversation) {
+    box.hidden = true;
+    return;
+  }
+  try {
+    const d = await api(`/api/v1/conversations/${currentConversation}`);
+    const t = d.thread?.thread;
+    if (!t) {
+      box.hidden = true;
+      return;
+    }
+    const open = (d.thread.questions || []).filter((q) => q.status === "open");
+    const orders = (d.orders || []).filter((o) => o.state !== "cancelled");
+    box.hidden = false;
+    box.innerHTML = `
+      <div class="row">
+        <h2 style="margin:0">${esc(t.title)}</h2>
+        ${tag(say(t.state))}
+        <span class="grow"></span>
+        <button class="ghost" onclick="openThreadFromTalk('${esc(t.id)}')">Подробно</button>
+        <button class="ghost" onclick="detachThread()">Не про эту нить</button>
+      </div>
+      ${canonBlock(t.canon || {}, t.id)}
+      ${
+        open.length
+          ? `<div style="margin-top:10px"><strong style="font-size:13px">Открытые вопросы</strong>
+             <ul class="plain">${open.map((q) => `<li>${esc(q.question)}</li>`).join("")}</ul></div>`
+          : ""
+      }
+      ${
+        orders.length
+          ? `<div class="muted" style="margin-top:10px">Поручения по нити:
+             ${orders.map((o) => `<a href="#" onclick="openOrderFromTalk('${esc(o.id)}');return false">${
+               esc(o.title)}</a> ${esc(say(o.state))}`).join(" · ")}</div>`
+          : ""
+      }
+      ${techNote(`<div style="margin-top:6px">${esc(t.id)} · рев. ${t.revision}</div>`)}`;
+  } catch {
+    // Нить — не главное в разговоре: без неё разговор всё равно работает.
+    box.hidden = true;
+  }
+}
+
+// canonBlock показывает состояние нити так, как о нём спрашивают вслух.
+//
+// Идентификатор нужен только для отмены: у ещё не заведённой нити его нет,
+// и отменять там нечего.
+function canonBlock(c, threadID) {
+  const rows = [
+    ["Чего хотим", c.goal],
+    ["Где остановились", c.situation],
+    ["Что мешает", (c.obstacles || []).join("; ")],
+    ["Чего ждём", (c.waiting || []).join("; ")],
+    ["Следующий шаг", c.next_step],
+  ].filter(([, v]) => v);
+
+  if (!rows.length) {
+    return `<p class="muted" style="margin:8px 0 0">Бэрримор пока ничего не
+      утверждает об этой нити — состояние появится, как только будет о чём сказать.</p>`;
+  }
+  const src = c.source && threadID
+    ? `<div class="muted" style="margin-top:8px">записано по источнику «${esc(c.source)}»${
+        c.updated_at ? ` · ${ago(c.updated_at)}` : ""
+      } · <a href="#" onclick="undoCanon('${esc(threadID)}');return false">вернуть прежнее</a></div>`
+    : "";
+  return `<dl class="kv" style="margin:10px 0 0">
+    ${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}
+  </dl>${src}`;
+}
+
+window.openThreadFromTalk = (id) => {
+  showTab("threads");
+  openThread(id);
+};
+
+window.openOrderFromTalk = (id) => {
+  showTab("orders");
+  openOrder(id);
+};
+
+window.detachThread = async () => {
+  if (!currentConversation) return;
+  if (!confirm("Отвязать разговор от нити? Сама нить останется на месте.")) return;
+  await api(`/api/v1/conversations/${currentConversation}/thread`, {
+    method: "POST", body: JSON.stringify({ thread_id: "", why: "владелец отвязал" }),
+  });
+  await loadThreadState();
+};
+
+window.undoCanon = async (threadID) => {
+  if (!threadID) return;
+  await api(`/api/v1/threads/${threadID}/canon/undo`, { method: "POST", body: "{}" });
+  await loadThreadState();
+  if (openThreadID === threadID) openThread(threadID);
+};
 
 function bubble(m) {
   const who = m.role === "person" ? "Вы" : "Бэрримор";
@@ -1395,8 +1498,10 @@ function bubble(m) {
   if (m.model) meta.push(esc(m.model));
   if (m.latency_ms) meta.push(`${Math.round(m.latency_ms / 1000)} с`);
   if (m.output_tokens) meta.push(`${m.prompt_tokens}+${m.output_tokens} токенов`);
+  // След извлечения объясняет, почему ответ получился таким. Владельцу это
+  // нужно редко, поэтому он живёт в техническом режиме, а не под каждой репликой.
   const trace = (m.retrieval_trace || []).length
-    ? `<div class="meta">подано в контекст: ${m.retrieval_trace.map(esc).join("; ")}</div>`
+    ? techNote(`<div class="meta">подано в контекст: ${m.retrieval_trace.map(esc).join("; ")}</div>`)
     : "";
   return `<div class="bubble ${esc(m.role)}">
     <div class="meta">${who} · ${when(m.created_at)}${meta.length ? " · " + meta.join(" · ") : ""}</div>
@@ -1417,13 +1522,62 @@ async function loadChat() {
   } catch (err) {
     $("chat").innerHTML = `<div class="muted">${esc(err.message)}</div>`;
   }
+  await restoreProposals();
+}
+
+// restoreProposals возвращает последнее предложение после перезагрузки.
+//
+// Предложение живёт в журнале, а не в браузере. Терять из-за обновления
+// вкладки готовое к одному нажатию поручение было бы обидно и незачем.
+async function restoreProposals() {
+  try {
+    const d = await api(`/api/v1/conversations/${currentConversation}/proposal`);
+    const conv = await api(`/api/v1/conversations/${currentConversation}`);
+    const t = conv.thread?.thread;
+
+    // Уже оформленное поручение не предлагается заново: после перезагрузки
+    // кнопка «Поручить» рядом с созданным поручением звала бы завести второе
+    // такое же.
+    // Номер предложения сервер читает из журнала, поэтому фильтрация не должна
+    // его сдвигать: исходная позиция едет вместе с предложением.
+    const done = new Set((conv.orders || []).map((o) => o.goal));
+    const proposal = { ...d.proposal,
+      work_order_proposals: (d.proposal.work_order_proposals || [])
+        .map((o, i) => ({ ...o, _index: i }))
+        .filter((o) => !done.has(o.goal)) };
+
+    renderProposals({
+      proposal,
+      reply: { id: d.message_id },
+      memory_candidates: [],
+      // Что стало с нитью, видно по самой нити: предложение заводить её
+      // показывается лишь до тех пор, пока разговор ни к чему не отнесён.
+      thread: t
+        ? { thread_id: t.id, title: t.title }
+        : threadOutcomeFrom(d.proposal),
+    });
+  } catch {
+    $("talk-proposals").hidden = true;
+  }
+}
+
+function threadOutcomeFrom(p) {
+  const m = p?.thread_match;
+  if (!m || !m.new_thread_title) return {};
+  return {
+    proposed: {
+      title: m.new_thread_title, kind: m.new_thread_kind, why: m.why,
+      state: p.thread_state || {},
+    },
+    why: m.why,
+  };
 }
 
 $("talk-new").addEventListener("click", async () => {
   try {
     const c = await api("/api/v1/conversations", {
       method: "POST",
-      body: JSON.stringify({ thread_id: $("talk-thread").value, title: "" }),
+      body: JSON.stringify({ thread_id: "", title: "" }),
     });
     currentConversation = c.id;
     $("talk-proposals").hidden = true;
@@ -1441,7 +1595,7 @@ async function send() {
   if (!currentConversation) {
     const c = await api("/api/v1/conversations", {
       method: "POST",
-      body: JSON.stringify({ thread_id: $("talk-thread").value, title: "" }),
+      body: JSON.stringify({ thread_id: "", title: "" }),
     });
     currentConversation = c.id;
   }
@@ -1467,6 +1621,7 @@ async function send() {
     clearInterval(timer);
     await loadChat();
     renderProposals(turn);
+    await loadThreadState();
     loadMemory();
   } catch (err) {
     clearInterval(timer);
@@ -1479,12 +1634,15 @@ async function send() {
   }
 }
 
-// renderProposals показывает предложения отдельно от ответа: они ничего
-// не меняют до вашего решения.
-// lastProposals хранит предложения последнего хода, чтобы кнопка «оформить»
-// могла взять их целиком, не вытаскивая текст обратно из разметки.
-let lastProposals = [];
-let lastThreadID = "";
+// renderProposals показывает то, что Бэрримор предложил, и даёт решить.
+//
+// Каждое предложение здесь доводится до конца одним нажатием: нить заводится
+// вместе с состоянием, поручение оформляется вместе с целью, причиной,
+// каталогом и критериями. Ничего из этого владелец не вводит повторно —
+// сервер берёт предложение из журнала, то есть из того, что Бэрримор
+// действительно сказал.
+let lastMessageID = "";
+let lastTurn = null;
 
 function renderProposals(turn) {
   const p = turn.proposal || {};
@@ -1492,28 +1650,29 @@ function renderProposals(turn) {
   const orders = p.work_order_proposals || [];
   const questions = p.open_questions || [];
   const pos = p.thread_position;
-  lastProposals = orders;
-  lastThreadID = turn.reply?.thread_id || "";
+  const th = turn.thread || {};
+  lastMessageID = turn.reply?.id || "";
+  lastTurn = turn;
 
-  if (!cands.length && !orders.length && !questions.length && !pos) {
+  const hasThread = !!th.proposed || th.attached || !!th.refused;
+  if (!cands.length && !orders.length && !questions.length && !pos && !hasThread) {
     $("talk-proposals").hidden = true;
     return;
   }
   $("talk-proposals").hidden = false;
   $("talk-proposals").innerHTML = `
-    <h2>Предложения Бэрримора</h2>
-    <p class="muted">Поручения и позиции не применены. Записи с пометкой
-      «записано» Бэрримор сделал сам — их можно сразу удалить.</p>
+    <h2>Что дальше</h2>
+    ${threadProposalBlock(th)}
     ${
-      pos
-        ? `<div style="margin-top:8px"><strong style="font-size:13px">Его позиция по нити</strong>
-           <div>${esc(pos.statement)}</div>
-           <div class="muted">${confidenceWord(pos.confidence)} · ${esc(pos.basis)}</div></div>`
+      orders.length
+        ? `<div style="margin-top:12px"><strong style="font-size:13px">Предлагаю поручить</strong>
+           <ul class="plain">${orders.map((o, i) =>
+             orderProposal(o, o._index ?? i)).join("")}</ul></div>`
         : ""
     }
     ${
       cands.length
-        ? `<div style="margin-top:10px"><strong style="font-size:13px">Память</strong>
+        ? `<div style="margin-top:12px"><strong style="font-size:13px">Память</strong>
            <ul class="plain">${cands.map((c) => `
              <li><div>${tag(c.type)} ${c.auto ? tag("записано", "ok") : ""} ${esc(c.content)}</div>
              <div class="muted" style="margin-top:4px">${esc(c.reason || "")}</div>
@@ -1528,54 +1687,198 @@ function renderProposals(turn) {
         : ""
     }
     ${
-      orders.length
-        ? `<div style="margin-top:10px"><strong style="font-size:13px">Поручить исполнителю</strong>
-           <ul class="plain">${orders.map((o, i) => `
-             <li>
-               <div>${esc(o.goal)}</div>
-               <div class="muted">${esc(o.why)}</div>
-               <div class="row" style="margin-top:6px">
-                 <button class="ghost" onclick="draftOrder(${i})">Оформить поручение</button>
-                 ${o.workspace_hint ? `<span class="muted">${esc(o.workspace_hint)}</span>` : ""}
-               </div>
-             </li>`).join("")}
-           </ul>
-           <div class="muted">Само поручение не создаётся: сначала выбирается исполнитель
-           и модель, и требуется ваше подтверждение.</div></div>`
+      pos
+        ? `<details style="margin-top:12px"><summary class="muted">его позиция по нити</summary>
+           <div>${esc(pos.statement)}</div>
+           <div class="muted">${confidenceWord(pos.confidence)} · ${esc(pos.basis)}</div></details>`
         : ""
     }
     ${
       questions.length
-        ? `<div style="margin-top:10px"><strong style="font-size:13px">Открытые вопросы</strong>
+        ? `<div style="margin-top:12px"><strong style="font-size:13px">Открытые вопросы</strong>
            <ul class="plain">${questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ul></div>`
         : ""
-    }`;
+    }
+    <div id="talk-approval"></div>`;
 }
 
-// draftOrder переносит предложение в форму поручения.
+// threadProposalBlock объясняет, что произошло с нитью.
 //
-// Именно переносит, а не создаёт: исполнитель, модель и подтверждение владельца
-// остаются впереди. Заставлять перепечатывать цель руками — единственное, чего
-// здесь можно избежать без потери контроля.
-window.draftOrder = (index) => {
-  const p = lastProposals[index];
-  if (!p) return;
-  showTab("orders");
-  $("wo-goal").value = p.goal;
-  if (p.workspace_hint) $("wo-root").value = p.workspace_hint;
-  const select = $("wo-thread");
-  if (lastThreadID && select) {
-    // Выбор нити переживает перерисовку списка: она загружается асинхронно.
-    const apply = () => {
-      if ([...select.options].some((o) => o.value === lastThreadID)) {
-        select.value = lastThreadID;
-      } else {
-        setTimeout(apply, 200);
-      }
-    };
-    apply();
+// Связывание Бэрримор делает сам, и молчать об этом нельзя: незаметное
+// действие, о котором владелец не знает, доверия не добавляет.
+function threadProposalBlock(th) {
+  if (th.refused) {
+    // Отказ без выхода из положения — тупик. Назвать нить владелец может сам,
+    // и делать это на другой вкладке ему незачем.
+    return `
+      <div class="notes" style="margin-top:8px">
+        ${esc(th.refused)}
+        <div class="row" style="margin-top:8px">
+          <input id="thread-manual" class="grow" placeholder="как назвать нить"
+            style="max-width:320px">
+          <button class="ghost" onclick="startThreadFromTalk(true)">Завести нить</button>
+        </div>
+      </div>`;
   }
-  $("wo-goal").focus();
+  if (th.attached) {
+    return `<div class="muted" style="margin-top:8px">
+      Отнёс разговор к нити «${esc(th.title || th.thread_id)}»${
+        th.why ? `: ${esc(th.why)}` : ""
+      }. Если это не она — нажмите «Не про эту нить» выше.</div>`;
+  }
+  if (!th.proposed) return "";
+  const s = th.proposed.state || {};
+  return `
+    <div style="margin-top:8px">
+      <div><strong>Похоже, это новое дело: «${esc(th.proposed.title)}»</strong></div>
+      ${th.proposed.why ? `<div class="muted">${esc(th.proposed.why)}</div>` : ""}
+      ${canonBlock({ goal: s.goal, situation: s.situation, next_step: s.next_step,
+                     obstacles: s.obstacles, waiting: s.waiting })}
+      <div class="row" style="margin-top:8px">
+        <button class="act" onclick="startThreadFromTalk()">Завести нить</button>
+        <span class="muted">заведу с этим названием и состоянием; править можно потом</span>
+      </div>
+    </div>`;
+}
+
+// orderProposal показывает поручение целиком — до того, как оно создано.
+//
+// Владелец видит ровно то, что уйдёт исполнителю, и решает по существу:
+// каталог и право менять файлы названы прямо, а не спрятаны в форму.
+function orderProposal(o, i) {
+  const write = o.needs_write;
+  return `
+    <li>
+      <div><strong>${esc(o.title || o.goal)}</strong></div>
+      <div style="margin-top:2px">${esc(o.goal)}</div>
+      <div class="muted" style="margin-top:2px">почему: ${esc(o.why)}</div>
+      <dl class="kv" style="margin-top:8px">
+        <dt>каталог</dt><dd>${
+          o.workspace_hint
+            ? esc(o.workspace_hint)
+            : `<input id="wo-root-${i}" placeholder="/home/…/git/rollboard" style="max-width:340px">`
+        }</dd>
+        ${
+          (o.acceptance_criteria || []).length
+            ? `<dt>что считается сделанным</dt><dd>${
+                o.acceptance_criteria.map(esc).join("; ")}</dd>`
+            : ""
+        }
+        <dt>доступ</dt><dd>${
+          write
+            ? `${tag("нужна правка файлов", "warn")} исполнитель работает в копии; ваш каталог
+               не тронут, изменения дойдут только по вашему решению`
+            : "только чтение"
+        }</dd>
+      </dl>
+      <div class="row" style="margin-top:8px">
+        <button class="act" onclick="orderFromTalk(${i})">Поручить</button>
+        <label class="switch"><input type="checkbox" id="wo-write-${i}" ${
+          write ? "checked" : ""
+        }> разрешить менять код</label>
+      </div>
+    </li>`;
+}
+
+// startThreadFromTalk заводит нить по предложению. Название, вид и состояние
+// сервер берёт из журнала — переносить их через браузер незачем.
+window.startThreadFromTalk = async (manual) => {
+  const body = { message_id: lastMessageID };
+  if (manual) {
+    const field = document.getElementById("thread-manual");
+    body.title = (field?.value || "").trim();
+    if (!body.title) {
+      field?.focus();
+      return;
+    }
+  }
+  try {
+    const th = await api(`/api/v1/conversations/${currentConversation}/threads`, {
+      method: "POST", body: JSON.stringify(body),
+    });
+    // Предложение стало нитью: перерисовываем тот же ход, чтобы кнопка
+    // «Завести нить» не осталась висеть рядом с уже заведённой.
+    if (lastTurn) {
+      lastTurn.thread = {
+        thread_id: th.id, title: th.title, attached: true,
+        why: "нить заведена по вашему решению",
+      };
+      renderProposals(lastTurn);
+    }
+    await loadThreadState();
+    await loadThreads();
+  } catch (err) {
+    alert(`Нить не заведена: ${err.message}`);
+  }
+};
+
+// orderFromTalk оформляет поручение и сразу показывает, что именно
+// подтверждается: исполнитель, модель, стоимость и каталог.
+window.orderFromTalk = async (index) => {
+  const rootField = document.getElementById(`wo-root-${index}`);
+  const writeField = document.getElementById(`wo-write-${index}`);
+  const body = { message_id: lastMessageID, index };
+  if (rootField) body.workspace_root = rootField.value.trim();
+  if (writeField) body.allow_write = writeField.checked;
+
+  try {
+    const p = await api(`/api/v1/conversations/${currentConversation}/work-orders`, {
+      method: "POST", body: JSON.stringify(body),
+    });
+    renderApproval(p);
+    await loadOrders();
+  } catch (err) {
+    $("talk-approval").innerHTML =
+      `<div class="notes" style="margin-top:10px">Поручение не создано: ${esc(err.message)}</div>`;
+  }
+};
+
+// renderApproval показывает подтверждение там же, где владелец сейчас смотрит.
+//
+// Уходить за ним на другую вкладку — ровно то хождение, от которого этот
+// экран и должен избавлять.
+function renderApproval(p) {
+  const o = p.order || {};
+  const a = p.approval || {};
+  $("talk-approval").innerHTML = `
+    <div class="card" style="margin-top:12px">
+      <div class="row"><strong>Запустить исполнителя?</strong>
+        ${o.audit_only ? tag("только чтение", "ok") : tag("с правкой файлов", "warn")}</div>
+      <div style="margin-top:6px">${esc(a.summary || "")}</div>
+      ${a.scope?.notes ? `<div class="muted" style="margin-top:4px">${esc(a.scope.notes)}</div>` : ""}
+      ${o.worker_rationale ? `<div class="muted" style="margin-top:4px">${esc(o.worker_rationale)}</div>` : ""}
+      <div class="row" style="margin-top:10px">
+        <button class="act" onclick="approveAndStart('${esc(a.id)}','${esc(o.id)}')">
+          Подтвердить и запустить</button>
+        <button class="ghost" onclick="denyFromTalk('${esc(a.id)}')">Не сейчас</button>
+      </div>
+    </div>`;
+}
+
+window.approveAndStart = async (approvalID, orderID) => {
+  try {
+    await api(`/api/v1/approvals/${approvalID}/grant`, {
+      method: "POST", body: JSON.stringify({ decided_by: "владелец" }),
+    });
+    await api(`/api/v1/work-orders/${orderID}/start`, { method: "POST", body: "{}" });
+    $("talk-approval").innerHTML =
+      `<div class="muted" style="margin-top:10px">Запустил. Скажу, когда будет результат —
+       и сам обновлю состояние нити.</div>`;
+    await loadOrders();
+    await loadThreadState();
+  } catch (err) {
+    $("talk-approval").innerHTML =
+      `<div class="notes" style="margin-top:10px">Не запущено: ${esc(err.message)}</div>`;
+  }
+};
+
+window.denyFromTalk = async (approvalID) => {
+  await api(`/api/v1/approvals/${approvalID}/deny`, {
+    method: "POST", body: JSON.stringify({ decided_by: "владелец", reason: "не сейчас" }),
+  });
+  $("talk-approval").innerHTML =
+    `<div class="muted" style="margin-top:10px">Хорошо, поручение остаётся неподтверждённым.</div>`;
+  await loadOrders();
 };
 
 $("talk-send").addEventListener("click", send);
@@ -1785,6 +2088,13 @@ function handleEvent(msg) {
   if (env.event_type.startsWith("work_order") || env.event_type.startsWith("worker_run") ||
       env.event_type.startsWith("verification")) {
     loadOrders();
+  }
+  // Нить Бэрримор обновляет сам — в том числе пока владелец смотрит на неё.
+  // Карточка, отставшая от журнала, показывала бы вчерашнее положение дел.
+  if (env.event_type === "thread.canon.updated" ||
+      env.event_type.startsWith("conversation.thread.")) {
+    loadThreadState();
+    if (openThreadID) openThread(openThreadID);
   }
 }
 

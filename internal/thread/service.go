@@ -415,6 +415,100 @@ func (s *Service) TouchActivity(ctx context.Context, threadID string) error {
 	return nil
 }
 
+// canonPayload — событие о смене канонического состояния.
+//
+// Previous хранится вместе с новым значением: без прежнего значения отменить
+// автоматическую правку можно было бы только пересборкой всего журнала, то
+// есть на практике никак.
+type canonPayload struct {
+	ID       string    `json:"id"`
+	Canon    Canon     `json:"canon"`
+	Previous Canon     `json:"previous"`
+	Reason   string    `json:"reason,omitempty"`
+	At       time.Time `json:"at"`
+	Revision int64     `json:"-"`
+}
+
+// SetCanon обновляет каноническое состояние нити.
+//
+// Источник обязателен: запись, сделанная после поручения, и запись со слов
+// владельца имеют разный вес, и владелец должен видеть, кто что утверждает.
+func (s *Service) SetCanon(ctx context.Context, id string, patch CanonPatch,
+	source, reason string, actor event.Actor) (Thread, error) {
+
+	if source == "" {
+		return Thread{}, fmt.Errorf("каноническое состояние без источника")
+	}
+	if patch.Empty() {
+		return s.Get(ctx, id)
+	}
+	if actor.Type == "" {
+		actor = event.Actor{Type: event.ActorBarrymore}
+	}
+
+	current, err := s.Get(ctx, id)
+	if err != nil {
+		return Thread{}, err
+	}
+	now := s.clock.Now()
+	next := patch.Apply(current.Canon)
+	next.Source = source
+	next.UpdatedAt = &now
+
+	p := canonPayload{ID: id, Canon: next, Previous: current.Canon, Reason: reason, At: now}
+	if _, err := s.journal.Write(ctx, func(tx *sql.Tx, w *event.TxWriter) error {
+		env, err := w.Append(ctx, event.Request{
+			StreamType: StreamType, StreamID: id, ExpectedRevision: event.AnyRevision,
+			EventType: EvCanonUpdated, Actor: actor, Payload: p,
+		})
+		if err != nil {
+			return err
+		}
+		p.Revision = env.StreamRevision
+		return applyCanon(ctx, tx, p)
+	}); err != nil {
+		return Thread{}, err
+	}
+	return s.Get(ctx, id)
+}
+
+// UndoCanon возвращает предыдущее каноническое состояние.
+//
+// Прежнее значение берётся из журнала, а не из отдельного хранилища отмен:
+// журнал и есть история, и второй её экземпляр расходился бы с первым.
+func (s *Service) UndoCanon(ctx context.Context, id string, actor event.Actor) (Thread, error) {
+	envs, err := s.journal.Stream(ctx, StreamType, id)
+	if err != nil {
+		return Thread{}, err
+	}
+	var last *canonPayload
+	for _, env := range envs {
+		if env.EventType != EvCanonUpdated {
+			continue
+		}
+		var p canonPayload
+		if err := env.Decode(&p); err != nil {
+			return Thread{}, err
+		}
+		last = &p
+	}
+	if last == nil {
+		return Thread{}, fmt.Errorf("%w: нить %s ещё не описывалась", ErrNotFound, id)
+	}
+
+	prev := last.Previous
+	restore := CanonPatch{
+		Goal: &prev.Goal, Situation: &prev.Situation, NextStep: &prev.NextStep,
+		Obstacles: &prev.Obstacles, Waiting: &prev.Waiting,
+	}
+	source := prev.Source
+	if source == "" {
+		// Отменяется первая запись: до неё нить не описывалась вовсе.
+		source = CanonFromPerson
+	}
+	return s.SetCanon(ctx, id, restore, source, "владелец отменил прошлую правку", actor)
+}
+
 // Projections регистрирует проекторы нитей.
 func (s *Service) Projections(reg *projection.Registry) {
 	reg.Tables(ProjectionTables...)
@@ -427,4 +521,5 @@ func (s *Service) Projections(reg *projection.Registry) {
 	reg.On(EvQuestionOpened, projectQuestionOpened)
 	reg.On(EvQuestionClosed, projectQuestionClosed)
 	reg.On(EvLinked, projectLink)
+	reg.On(EvCanonUpdated, projectCanon)
 }

@@ -70,7 +70,9 @@ POST      /api/v1/probes
 
 ## 4. Основные события
 
-Threads: `thread.created`, `thread.updated`, `thread.state.changed`, `thread.position.updated`, `thread.linked`, `thread.decision.recorded`, `thread.question.opened`, `thread.released`.
+Threads: `thread.created`, `thread.updated`, `thread.state.changed`, `thread.canon.updated`, `thread.position.updated`, `thread.linked`, `thread.decision.recorded`, `thread.question.opened`, `thread.released`.
+
+Conversations: `conversation.started`, `conversation.message.recorded`, `conversation.proposal.received`, `conversation.thread.attached`, `conversation.thread.detached`.
 
 Memory: `memory.candidate.proposed`, `accepted`, `rejected`, `memory.created`, `superseded`, `revoked`, `retrieved`.
 

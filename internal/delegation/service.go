@@ -469,6 +469,7 @@ func (s *Service) Start(ctx context.Context, orderID string, actor event.Actor) 
 	if err := s.createExpectations(ctx, order, run, baseline); err != nil {
 		return run, err
 	}
+	s.reflectStart(ctx, order)
 	return run, nil
 }
 

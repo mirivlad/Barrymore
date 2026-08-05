@@ -49,11 +49,44 @@ type Message struct {
 // Это предложения, а не изменения состояния.
 type Proposal struct {
 	Reply string `json:"reply"`
+	// ThreadMatch — к какой нити относится разговор.
+	ThreadMatch *ThreadMatch `json:"thread_match,omitempty"`
+	// ThreadState — каноническое состояние нити после этого хода.
+	ThreadState *StateProposal `json:"thread_state,omitempty"`
 	// ThreadPosition — как Бэрримор формулирует свою позицию по нити.
 	ThreadPosition   *PositionProposal   `json:"thread_position,omitempty"`
 	MemoryCandidates []MemoryProposal    `json:"memory_candidates"`
 	WorkOrders       []WorkOrderProposal `json:"work_order_proposals"`
 	OpenQuestions    []string            `json:"open_questions"`
+}
+
+// ThreadMatch — к какой нити Бэрримор относит разговор.
+//
+// Либо к уже существующей — тогда заполнен ThreadID, и он обязан быть из
+// списка, который runtime сам показал модели. Либо ни к какой из них — тогда
+// предлагается завести новую, и решает это владелец.
+type ThreadMatch struct {
+	ThreadID       string `json:"thread_id"`
+	NewThreadTitle string `json:"new_thread_title"`
+	NewThreadKind  string `json:"new_thread_kind"`
+	Why            string `json:"why"`
+}
+
+// StateProposal — предложенное каноническое состояние нити.
+//
+// Не пересказ разговора: то, что Бэрримор утверждает о нити и за что отвечает.
+type StateProposal struct {
+	Goal      string   `json:"goal"`
+	Situation string   `json:"situation"`
+	NextStep  string   `json:"next_step"`
+	Obstacles []string `json:"obstacles"`
+	Waiting   []string `json:"waiting"`
+}
+
+// Empty сообщает, что состояние не сформулировано.
+func (s StateProposal) Empty() bool {
+	return s.Goal == "" && s.Situation == "" && s.NextStep == "" &&
+		len(s.Obstacles) == 0 && len(s.Waiting) == 0
 }
 
 // PositionProposal — предложенная позиция Бэрримора.
@@ -79,10 +112,20 @@ type MemoryProposal struct {
 //
 // Это только предложение: поручение создаётся отдельным действием владельца,
 // проходит выбор исполнителя, политику стоимости и подтверждение.
+//
+// Заполнено оно целиком — заголовок, цель, причина, каталог, критерии приёмки.
+// Половина полей означала бы, что вторую половину придётся печатать заново,
+// а именно этого владелец и не должен делать.
 type WorkOrderProposal struct {
-	Goal          string `json:"goal"`
-	Why           string `json:"why"`
-	WorkspaceHint string `json:"workspace_hint,omitempty"`
+	Title              string   `json:"title"`
+	Goal               string   `json:"goal"`
+	Why                string   `json:"why"`
+	WorkspaceHint      string   `json:"workspace_hint,omitempty"`
+	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty"`
+	// NeedsWrite — нужна ли исполнителю правка файлов. Это предложение, а не
+	// разрешение: запись включается подтверждением владельца, и в подтверждении
+	// она названа прямо.
+	NeedsWrite bool `json:"needs_write,omitempty"`
 }
 
 // Turn — итог одного хода разговора.
@@ -91,6 +134,36 @@ type Turn struct {
 	Reply            Message             `json:"reply"`
 	Proposal         Proposal            `json:"proposal"`
 	MemoryCandidates []MemoryCandidateID `json:"memory_candidates"`
+	// Thread сообщает, что стало с нитью разговора на этом ходу.
+	Thread ThreadOutcome `json:"thread"`
+}
+
+// ThreadOutcome — судьба нити после хода.
+//
+// Разделение намеренное: связать разговор с уже существующей нитью Бэрримор
+// может сам — это обратимо и ничего не создаёт. Завести новую нить он только
+// предлагает: сущности, появляющиеся без ведома владельца, засоряют систему
+// быстрее, чем приносят пользу.
+type ThreadOutcome struct {
+	// ThreadID — нить разговора после хода, если она есть.
+	ThreadID string `json:"thread_id,omitempty"`
+	Title    string `json:"title,omitempty"`
+	// Attached сообщает, что Бэрримор связал разговор с нитью на этом ходу.
+	Attached bool `json:"attached,omitempty"`
+	// Why объясняет выбор — и связывание, и предложение.
+	Why string `json:"why,omitempty"`
+	// Proposed заполнен, когда подходящей нити не нашлось.
+	Proposed *NewThreadProposal `json:"proposed,omitempty"`
+	// Refused объясняет, почему предложение модели не применено.
+	Refused string `json:"refused,omitempty"`
+}
+
+// NewThreadProposal — предложение завести нить, готовое к одному нажатию.
+type NewThreadProposal struct {
+	Title string        `json:"title"`
+	Kind  string        `json:"kind"`
+	Why   string        `json:"why"`
+	State StateProposal `json:"state"`
 }
 
 // MemoryCandidateID — созданный кандидат в память.
@@ -111,7 +184,29 @@ const (
 	EvConversationStarted = "conversation.started"
 	EvMessageRecorded     = "conversation.message.recorded"
 	EvProposalReceived    = "conversation.proposal.received"
+	// EvThreadAttached — разговор отнесён к нити.
+	EvThreadAttached = "conversation.thread.attached"
+	// EvThreadDetached — связь с нитью снята.
+	EvThreadDetached = "conversation.thread.detached"
 )
+
+// proposalPayload — запись о том, что Бэрримор предложил в этом ходу.
+//
+// Она и есть источник правды для последующих действий владельца: поручение
+// оформляется из неё, а не из того, что прислал браузер.
+type proposalPayload struct {
+	MessageID string   `json:"message_id"`
+	Proposal  Proposal `json:"proposal"`
+}
+
+// threadLinkPayload — событие о связи разговора с нитью.
+type threadLinkPayload struct {
+	ConversationID string    `json:"conversation_id"`
+	ThreadID       string    `json:"thread_id,omitempty"`
+	Previous       string    `json:"previous,omitempty"`
+	Why            string    `json:"why,omitempty"`
+	At             time.Time `json:"at"`
+}
 
 // StreamType — тип потока событий разговора.
 const StreamType = "conversation"
@@ -128,11 +223,44 @@ func ResponseSchema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
-  "required": ["reply", "memory_candidates", "work_order_proposals", "open_questions"],
+  "required": ["reply", "thread_match", "thread_state", "memory_candidates",
+               "work_order_proposals", "open_questions"],
   "properties": {
     "reply": {
       "type": "string",
       "description": "Ответ Бэрримора владельцу на русском языке."
+    },
+    "thread_match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["thread_id", "new_thread_title", "new_thread_kind", "why"],
+      "properties": {
+        "thread_id": {
+          "type": "string",
+          "description": "Идентификатор нити из раздела «Нити, которые уже есть», если разговор о ней. Иначе пустая строка. Придумывать идентификатор нельзя."
+        },
+        "new_thread_title": {
+          "type": "string",
+          "description": "Короткое название новой нити, если разговор не относится ни к одной из существующих. Иначе пустая строка."
+        },
+        "new_thread_kind": {
+          "type": "string",
+          "enum": ["", "project", "idea", "problem", "decision", "conversation", "research", "waiting", "personal"]
+        },
+        "why": {"type": "string", "description": "Почему именно эта нить."}
+      }
+    },
+    "thread_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goal", "situation", "next_step", "obstacles", "waiting"],
+      "properties": {
+        "goal": {"type": "string", "description": "Чего мы хотим добиться в этой нити."},
+        "situation": {"type": "string", "description": "Где остановились прямо сейчас."},
+        "next_step": {"type": "string", "description": "Какой шаг следующий."},
+        "obstacles": {"type": "array", "items": {"type": "string"}},
+        "waiting": {"type": "array", "items": {"type": "string"}}
+      }
     },
     "thread_position": {
       "type": "object",
@@ -164,11 +292,18 @@ func ResponseSchema() json.RawMessage {
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["goal", "why"],
+        "required": ["title", "goal", "why", "workspace_hint", "acceptance_criteria", "needs_write"],
         "properties": {
-          "goal": {"type": "string"},
-          "why": {"type": "string"},
-          "workspace_hint": {"type": "string"}
+          "title": {"type": "string", "description": "Короткий заголовок поручения."},
+          "goal": {"type": "string", "description": "Что именно должен сделать исполнитель."},
+          "why": {"type": "string", "description": "Почему это нужно сейчас."},
+          "workspace_hint": {"type": "string", "description": "Абсолютный путь к каталогу работы, если он известен из разговора или памяти."},
+          "acceptance_criteria": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "По каким признакам будет видно, что работа сделана."
+          },
+          "needs_write": {"type": "boolean", "description": "Нужно ли исполнителю менять файлы. Если достаточно прочитать — false."}
         }
       }
     },

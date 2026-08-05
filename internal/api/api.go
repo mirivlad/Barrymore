@@ -55,6 +55,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/threads/{id}/decisions", s.addDecision)
 	mux.HandleFunc("POST /api/v1/threads/{id}/questions", s.addQuestion)
 	mux.HandleFunc("GET /api/v1/threads/{id}/timeline", s.threadTimeline)
+	mux.HandleFunc("POST /api/v1/threads/{id}/canon", s.setCanon)
+	mux.HandleFunc("POST /api/v1/threads/{id}/canon/undo", s.undoCanon)
 
 	mux.HandleFunc("GET /api/v1/workers", s.listWorkers)
 	mux.HandleFunc("POST /api/v1/workers/discover", s.discoverWorkers)
@@ -82,8 +84,13 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/v1/conversations", s.listConversations)
 	mux.HandleFunc("POST /api/v1/conversations", s.createConversation)
+	mux.HandleFunc("GET /api/v1/conversations/{id}", s.getConversation)
 	mux.HandleFunc("GET /api/v1/conversations/{id}/messages", s.conversationMessages)
 	mux.HandleFunc("POST /api/v1/conversations/{id}/messages", s.sendMessage)
+	mux.HandleFunc("GET /api/v1/conversations/{id}/proposal", s.lastProposal)
+	mux.HandleFunc("POST /api/v1/conversations/{id}/thread", s.setConversationThread)
+	mux.HandleFunc("POST /api/v1/conversations/{id}/threads", s.startThreadFromTalk)
+	mux.HandleFunc("POST /api/v1/conversations/{id}/work-orders", s.orderFromTalk)
 
 	mux.HandleFunc("GET /api/v1/memory/candidates", s.memoryCandidates)
 	mux.HandleFunc("POST /api/v1/memory/candidates/{id}/accept", s.acceptCandidate)

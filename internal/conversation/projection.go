@@ -31,6 +31,32 @@ func projectConversation(ctx context.Context, tx *sql.Tx, env event.Envelope) er
 	return applyConversation(ctx, tx, c)
 }
 
+// applyThreadLink переносит связь разговора с нитью.
+//
+// Прошлые сообщения получают ту же нить: разговор целиком относится к ней,
+// и половина реплик, оставшаяся без нити, выпала бы из её ленты.
+func applyThreadLink(ctx context.Context, tx *sql.Tx, p threadLinkPayload) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE conversations SET thread_id = ?, updated_at = ? WHERE id = ?`,
+		nullable(p.ThreadID), ts(p.At), p.ConversationID); err != nil {
+		return fmt.Errorf("связь разговора %s с нитью: %w", p.ConversationID, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE messages SET thread_id = ? WHERE conversation_id = ?`,
+		nullable(p.ThreadID), p.ConversationID); err != nil {
+		return fmt.Errorf("перенос сообщений разговора %s: %w", p.ConversationID, err)
+	}
+	return nil
+}
+
+func projectThreadLink(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
+	var p threadLinkPayload
+	if err := env.Decode(&p); err != nil {
+		return err
+	}
+	return applyThreadLink(ctx, tx, p)
+}
+
 func applyMessage(ctx context.Context, tx *sql.Tx, m Message) error {
 	trace, _ := json.Marshal(orEmpty(m.RetrievalTrace))
 	_, err := tx.ExecContext(ctx, `

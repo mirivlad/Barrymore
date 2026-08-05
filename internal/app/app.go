@@ -50,6 +50,12 @@ type Config struct {
 	ProviderLabel    string
 	// ProviderAPIKey читается из окружения и нигде не журналируется.
 	ProviderAPIKey string
+	// Provider подставляет готового провайдера вместо создаваемого по адресу.
+	//
+	// Нужен сквозным тестам: путь «браузер → маршрут → служба → база» иначе
+	// проверить нечем, а проверять его отдельно от разговорного слоя значит
+	// не проверять главный сценарий продукта вовсе.
+	Provider model.Provider
 	// MemoryPolicy задаёт, что Бэрримор записывает сам.
 	MemoryPolicy memory.Policy
 	// InitiativePolicy задаёт рамки, в которых Бэрримор обращается первым.
@@ -173,8 +179,8 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 	a.Config = cfg
 
-	var provider model.Provider
-	if cfg.ProviderEndpoint != "" {
+	provider := cfg.Provider
+	if provider == nil && cfg.ProviderEndpoint != "" {
 		provider = model.NewOpenAICompatible(
 			cfg.ProviderEndpoint, cfg.ProviderModel, cfg.ProviderAPIKey, cfg.ProviderLabel)
 	}
