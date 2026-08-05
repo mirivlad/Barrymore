@@ -37,6 +37,24 @@ const reply = {
   open_questions: ["что именно означает «завис»?"],
 };
 
+// Идентификатор нити берётся из того же списка, который Бэрримор показал
+// в промпте. Так и работает настоящая модель, и так проверяется вторая ветка
+// сопоставления: не «предложить новую», а «узнать уже существующую».
+function replyFor(prompt) {
+  const known = /\bthr_[a-z0-9]+/.exec(prompt || "");
+  if (!known) return reply;
+  return {
+    ...reply,
+    reply: "Это та же история с Rollboard, продолжаем.",
+    thread_match: {
+      thread_id: known[0],
+      new_thread_title: "",
+      new_thread_kind: "",
+      why: "разговор о той же нити Rollboard",
+    },
+  };
+}
+
 const server = http.createServer((req, res) => {
   if (req.url.startsWith("/v1/models")) {
     res.writeHead(200, { "content-type": "application/json" });
@@ -47,10 +65,17 @@ const server = http.createServer((req, res) => {
     let body = "";
     req.on("data", (c) => (body += c));
     req.on("end", () => {
+      let prompt = "";
+      try {
+        prompt = (JSON.parse(body).messages || [])
+          .map((m) => m.content).join("\n");
+      } catch {
+        // Неразбираемый запрос — не повод молчать: отдаём общий ответ.
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         model: "e2e",
-        choices: [{ message: { role: "assistant", content: JSON.stringify(reply) } }],
+        choices: [{ message: { role: "assistant", content: JSON.stringify(replyFor(prompt)) } }],
         usage: { prompt_tokens: 10, completion_tokens: 20 },
       }));
     });

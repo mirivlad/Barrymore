@@ -1535,7 +1535,9 @@ function bubble(m) {
   </div>`;
 }
 
-async function loadChat() {
+// restore=false нужен, когда следом всё равно рисуются предложения хода:
+// два подряд обновления одного блока дают заметный мигающий скачок.
+async function loadChat(restore = true) {
   if (!currentConversation) return;
   try {
     const d = await api(`/api/v1/conversations/${currentConversation}/messages`);
@@ -1547,7 +1549,7 @@ async function loadChat() {
   } catch (err) {
     $("chat").innerHTML = `<div class="muted">${esc(err.message)}</div>`;
   }
-  await restoreProposals();
+  if (restore) await restoreProposals();
 }
 
 // restoreProposals возвращает последнее предложение после перезагрузки.
@@ -1607,6 +1609,10 @@ $("talk-new").addEventListener("click", async () => {
     currentConversation = c.id;
     $("talk-proposals").hidden = true;
     await loadChat();
+    // Карточка нити принадлежит разговору, а не экрану. Без этого на новом
+    // разговоре оставалась нить прежнего — и владелец читал бы состояние
+    // одного дела, разговаривая о другом.
+    await loadThreadState();
   } catch (err) {
     alert(`Разговор не начат: ${err.message}`);
   }
@@ -1644,7 +1650,7 @@ async function send() {
       method: "POST", body: JSON.stringify({ text }),
     });
     clearInterval(timer);
-    await loadChat();
+    await loadChat(false);
     renderProposals(turn);
     await loadThreadState();
     loadMemory();

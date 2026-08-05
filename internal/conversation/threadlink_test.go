@@ -324,3 +324,36 @@ func TestEmptyThreadListIsStatedOutLoud(t *testing.T) {
 		t.Fatal("модели не сказано, что нитей нет: пустоту она достроит сама")
 	}
 }
+
+// Найдено живьём: настоящая модель отнесла разговор к верной нити, но `why`
+// вернула пустым — и связь оказалась в журнале без объяснения. Автоматическое
+// изменение без причины нельзя ни проверить, ни оспорить.
+func TestSilentMatchStillCarriesReason(t *testing.T) {
+	ctx := context.Background()
+	prov := &scriptedProvider{}
+	h := newHarness(t, prov, memory.DefaultPolicy())
+
+	th, err := h.threads.Create(ctx, thread.CreateRequest{
+		Title: "Rollboard", Kind: thread.KindProblem,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov.reply = reply("Продолжаем.", match(th.ID, "", ""))
+
+	c := h.conversation(t, "")
+	turn, err := h.talk.Send(ctx, c.ID, "опять Rollboard")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !turn.Thread.Attached {
+		t.Fatalf("нить не выбрана: %+v", turn.Thread)
+	}
+	if turn.Thread.Why == "" {
+		t.Fatal("связь создана без объяснения")
+	}
+	// Подставляется факт, а не выдуманное обоснование.
+	if !strings.Contains(turn.Thread.Why, "из показанного списка") {
+		t.Fatalf("объяснение звучит как догадка: %q", turn.Thread.Why)
+	}
+}

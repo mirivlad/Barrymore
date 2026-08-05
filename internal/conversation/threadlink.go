@@ -51,13 +51,20 @@ func (s *Service) settleThread(ctx context.Context, conv *Conversation,
 			s.log.Warn("предложена непредложенная нить", "conversation", conv.ID, "thread", id)
 			return out
 		}
-		if err := s.Attach(ctx, conv.ID, id, m.Why,
+		// Причина обязана быть: автоматическое изменение без объяснения нельзя
+		// ни проверить, ни оспорить. Если модель промолчала, подставляется не
+		// выдуманное обоснование, а то, что произошло на самом деле.
+		why := strings.TrimSpace(m.Why)
+		if why == "" {
+			why = "выбрана по смыслу разговора из показанного списка нитей"
+		}
+		if err := s.Attach(ctx, conv.ID, id, why,
 			event.Actor{Type: event.ActorBarrymore}); err != nil {
 			s.log.Error("разговор не связан с нитью", "conversation", conv.ID, "error", err)
 			return out
 		}
 		conv.ThreadID = id
-		return ThreadOutcome{ThreadID: id, Title: title, Attached: true, Why: m.Why}
+		return ThreadOutcome{ThreadID: id, Title: title, Attached: true, Why: why}
 	}
 
 	if title := strings.TrimSpace(m.NewThreadTitle); title != "" {

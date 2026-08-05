@@ -170,15 +170,48 @@ async function main() {
     });
   }
 
-  await check("страница не ругалась в консоль", async () => {
-    if (consoleErrors.length) throw new Error(consoleErrors.join("; "));
-  });
-
   await check("состояние нити переживает перезагрузку страницы", async () => {
     await page.reload();
     await page.locator("#thread-state").waitFor({ state: "visible", timeout: 10000 });
     const text = await page.locator("#thread-state").innerText();
     if (!text.includes("Rollboard")) throw new Error("после перезагрузки нить пропала");
+  });
+
+  console.log("Узнавание уже существующей нити:");
+
+  await check("новый разговор сам находит прежнюю нить", async () => {
+    await page.getByRole("button", { name: "Новый разговор" }).click();
+    await page.locator("#talk-input").fill("Вернёмся к Rollboard: что там с worktree?");
+    await page.locator("#talk-send").click();
+
+    // Связь Бэрримор делает сам — нажимать нечего, и это главное отличие
+    // от прежнего порядка, где нить выбирали из списка до первой реплики.
+    await page.locator("#thread-state").waitFor({ state: "visible", timeout: 30000 });
+    const text = await page.locator("#thread-state").innerText();
+    if (!text.includes("Rollboard")) throw new Error(`карточка нити: ${text.slice(0, 120)}`);
+  });
+
+  await check("владельцу сказано, что разговор отнесён к нити", async () => {
+    const text = await page.locator("#talk-proposals").innerText();
+    if (!text.includes("Отнёс разговор к нити")) {
+      throw new Error("связь сделана молча — владелец не узнает, что произошло");
+    }
+  });
+
+  await check("вторая нить не заведена", async () => {
+    const threads = await (await fetch(`${BASE}/api/v1/threads`)).json();
+    const count = (threads.items || []).length;
+    if (count !== 1) throw new Error(`нитей ${count}, ожидалась одна: узнавание не сработало`);
+  });
+
+  await check("связь можно снять", async () => {
+    page.once("dialog", (d) => d.accept());
+    await page.getByRole("button", { name: "Не про эту нить" }).click();
+    await waitFor("карточка нити исчезла", async () => await page.locator("#thread-state").isHidden());
+  });
+
+  await check("страница не ругалась в консоль", async () => {
+    if (consoleErrors.length) throw new Error(consoleErrors.join("; "));
   });
 
   await browser.close();
