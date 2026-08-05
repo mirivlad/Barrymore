@@ -298,12 +298,30 @@ func (s *Service) Active(ctx context.Context, limit int) ([]Item, error) {
 }
 
 // All возвращает все записи, включая отозванные.
+// All возвращает то, что Бэрримор действительно помнит.
+//
+// Надгробия сюда не попадают: список памяти отвечает на вопрос «что ты обо мне
+// знаешь», и строки «[удалено владельцем]» в нём выглядели бы так, будто
+// удаление не сработало. Сами надгробия никуда не деваются — их отдаёт
+// Forgotten, и о них прямо сказано при удалении.
 func (s *Service) All(ctx context.Context, limit int) ([]Item, error) {
+	return s.items(ctx, ` WHERE forgotten_at IS NULL AND revoked_at IS NULL`, limit)
+}
+
+// Forgotten возвращает надгробия: записи, содержание которых удалено.
+//
+// Существуют потому, что событие из журнала удалить нельзя (06_SECURITY §11),
+// и делать вид, будто записи никогда не было, Бэрримор не станет.
+func (s *Service) Forgotten(ctx context.Context, limit int) ([]Item, error) {
+	return s.items(ctx, ` WHERE forgotten_at IS NOT NULL`, limit)
+}
+
+func (s *Service) items(ctx context.Context, where string, limit int) ([]Item, error) {
 	if limit <= 0 {
 		limit = 200
 	}
 	rows, err := s.db.Reader().QueryContext(ctx,
-		selectItemColumns+` ORDER BY created_at DESC LIMIT ?`, limit)
+		selectItemColumns+where+` ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("чтение памяти: %w", err)
 	}

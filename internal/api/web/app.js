@@ -1345,8 +1345,11 @@ async function loadMemory() {
 
   try {
     const q = $("mem-search").value.trim();
-    const d = await api(`/api/v1/memories${q ? `?q=${encodeURIComponent(q)}` : ""}`);
+    const d = await api(q
+      ? `/api/v1/memories?q=${encodeURIComponent(q)}`
+      : "/api/v1/memories?forgotten=true");
     const items = d.items || [];
+    renderForgotten(d.forgotten || []);
     $("mem-items").innerHTML = items.length
       ? items.map((m) => `
           <li${m.revoked_at ? ' style="opacity:.55"' : ""}>
@@ -1387,6 +1390,33 @@ async function loadMemory() {
   } catch (err) {
     $("mem-items").innerHTML = `<li class="muted">${esc(err.message)}</li>`;
   }
+}
+
+// renderForgotten показывает надгробия отдельно и в свёрнутом виде.
+//
+// В общем списке они выглядели бы так, будто удаление не сработало. Но и
+// прятать их совсем нельзя: событие из журнала удалить невозможно, и делать
+// вид, будто записи никогда не было, Бэрримор не станет.
+function renderForgotten(items) {
+  const box = $("mem-forgotten");
+  if (!box) return;
+  if (!items.length) {
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = `
+    <details>
+      <summary class="muted">удалённые записи (${items.length})</summary>
+      <p class="muted" style="margin:6px 0">Содержание удалено и в поиске
+        не участвует. В журнале остаётся отметка о том, что запись была
+        и была удалена: событие оттуда удалить нельзя.</p>
+      <ul class="plain">${items.map((m) => `
+        <li class="muted">
+          ${tag(m.type)} удалено ${when(m.forgotten_at)}
+          ${m.revoke_reason ? `· ${esc(m.revoke_reason)}` : ""}
+        </li>`).join("")}</ul>
+    </details>`;
 }
 
 $("mem-search").addEventListener("input", () => {

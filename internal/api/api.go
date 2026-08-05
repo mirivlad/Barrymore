@@ -817,7 +817,17 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "память недоступна", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	// Надгробия отдаются отдельно и по запросу: в обычном списке они выглядели
+	// бы так, будто удаление не сработало.
+	forgotten := []memory.Item{}
+	if r.URL.Query().Get("forgotten") == "true" {
+		forgotten, err = s.app.Memory.Forgotten(ctx, 200)
+		if err != nil {
+			writeProblem(w, http.StatusInternalServerError, "память недоступна", err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "forgotten": forgotten})
 }
 
 // rememberDirect записывает то, что владелец прямо попросил запомнить.
