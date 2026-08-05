@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -493,4 +495,223 @@ func TestReconcileResumesLiveRun(t *testing.T) {
 		t.Fatal("чтение вывода не восстановлено")
 	}
 	_ = runner.ProcessIdentityForRun(run.ID)
+}
+
+// ---------- контролируемая запись ----------
+
+// gitWorkspace превращает рабочий каталог стенда в настоящий репозиторий:
+// контролируемая запись держится на git.
+func (h *harness) gitWorkspace(t *testing.T) {
+	t.Helper()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", h.workDir}, args...)...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=Тест", "GIT_AUTHOR_EMAIL=t@localhost",
+			"GIT_COMMITTER_NAME=Тест", "GIT_COMMITTER_EMAIL=t@localhost")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main")
+	run("add", "-A")
+	run("commit", "-q", "-m", "исходное состояние")
+}
+
+func (h *harness) proposeWrite(t *testing.T, goal string) delegation.Proposal {
+	t.Helper()
+	ctx := context.Background()
+	th, err := h.threads.Create(ctx, thread.CreateRequest{
+		Title: "Нить с записью", Kind: thread.KindProject,
+	})
+	if err != nil {
+		t.Fatalf("создание нити: %v", err)
+	}
+	p, err := h.deleg.Propose(ctx, delegation.ProposeRequest{
+		ThreadID: th.ID, Goal: goal, WorkspaceRoot: h.workDir, AuditOnly: false,
+	})
+	if err != nil {
+		t.Fatalf("формирование поручения: %v", err)
+	}
+	return p
+}
+
+// Полный контур записи: исполнитель правит копию, каталог владельца остаётся
+// нетронутым, изменения ждут решения и доходят только по нему.
+func TestControlledWriteReachesOwnerOnlyByDecision(t *testing.T) {
+	script := `
+		echo '{"summary":"правлю"}'
+		echo "добавлено исполнителем" >> README.md
+		echo "новый файл" > добавленный.txt
+		cat > "$OUT_DIR/last-message.txt" <<'REPORT'
+{"summary":"правки внесены","findings":[],"limitations":"нет"}
+REPORT
+		echo '{"summary":"готово"}'`
+	h := newHarness(t, &fakeAdapter{script: script, model: freeModel()})
+	h.gitWorkspace(t)
+
+	p := h.proposeWrite(t, "дописать строку в README")
+	// Владельцу до запуска сказано, что запись идёт в копию.
+	if !strings.Contains(p.Approval.Summary, "копию") {
+		t.Fatalf("подтверждение не объясняет, куда пишет исполнитель: %q", p.Approval.Summary)
+	}
+
+	h.approveAndStart(t, p)
+	ctx := context.Background()
+	waitFor(t, "поручение завершилось", func() bool {
+		o, err := h.deleg.Get(ctx, p.Order.ID)
+		return err == nil && (o.State == delegation.StateCompleted || o.State == delegation.StateFailed)
+	})
+
+	o, err := h.deleg.Get(ctx, p.Order.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.State != delegation.StateCompleted {
+		t.Fatalf("состояние %q, причина: %s", o.State, o.FailureReason)
+	}
+
+	// Каталог владельца не тронут.
+	readme, err := os.ReadFile(filepath.Join(h.workDir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(readme), "добавлено исполнителем") {
+		t.Fatal("исполнитель дописал прямо в каталог владельца, минуя копию")
+	}
+	if _, err := os.Stat(filepath.Join(h.workDir, "добавленный.txt")); err == nil {
+		t.Fatal("исполнитель создал файл в каталоге владельца без решения владельца")
+	}
+
+	// Изменения собраны и ждут решения.
+	if o.ChangeState != delegation.ChangeCollected {
+		t.Fatalf("состояние изменений %q, ожидалось collected", o.ChangeState)
+	}
+	if len(o.ChangeSummary.Files) != 2 {
+		t.Fatalf("собрано файлов %d, ожидалось 2: %+v", len(o.ChangeSummary.Files), o.ChangeSummary.Files)
+	}
+	if o.ChangeSummary.Patch == "" {
+		t.Fatal("дифф не сохранён: владельцу нечего смотреть")
+	}
+
+	// Решение владельца — и только оно — доносит изменения.
+	res, err := h.deleg.ApplyChanges(ctx, p.Order.ID, "проверено",
+		event.Actor{Type: event.ActorPerson})
+	if err != nil {
+		t.Fatalf("применение: %v", err)
+	}
+	if !res.Applied {
+		t.Fatal("применение не состоялось")
+	}
+	readme, err = os.ReadFile(filepath.Join(h.workDir, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(readme), "добавлено исполнителем") {
+		t.Fatal("после решения владельца правка не дошла до файла")
+	}
+
+	after, err := h.deleg.Get(ctx, p.Order.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ChangeState != delegation.ChangeApplied {
+		t.Fatalf("состояние изменений после применения %q", after.ChangeState)
+	}
+	if after.ChangeDecidedAt == nil {
+		t.Fatal("время решения не записано")
+	}
+}
+
+// Отказ убирает копию и не трогает каталог владельца.
+func TestDiscardedChangesNeverReachTheOwner(t *testing.T) {
+	script := `
+		echo "мусор" > мусор.txt
+		cat > "$OUT_DIR/last-message.txt" <<'REPORT'
+{"summary":"насорил","findings":[],"limitations":"нет"}
+REPORT`
+	h := newHarness(t, &fakeAdapter{script: script, model: freeModel()})
+	h.gitWorkspace(t)
+
+	p := h.proposeWrite(t, "что-нибудь сделать")
+	h.approveAndStart(t, p)
+	ctx := context.Background()
+	waitFor(t, "поручение завершилось", func() bool {
+		o, err := h.deleg.Get(ctx, p.Order.ID)
+		return err == nil && (o.State == delegation.StateCompleted || o.State == delegation.StateFailed)
+	})
+
+	o, _ := h.deleg.Get(ctx, p.Order.ID)
+	copyPath := o.WorkCopyPath
+	if copyPath == "" {
+		t.Fatal("копия не создана")
+	}
+
+	if err := h.deleg.DiscardChanges(ctx, p.Order.ID, "не нужно",
+		event.Actor{Type: event.ActorPerson}); err != nil {
+		t.Fatalf("отказ: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(h.workDir, "мусор.txt")); err == nil {
+		t.Fatal("отброшенные изменения оказались в каталоге владельца")
+	}
+	if _, err := os.Stat(copyPath); !os.IsNotExist(err) {
+		t.Fatal("копия не убрана после отказа")
+	}
+
+	after, _ := h.deleg.Get(ctx, p.Order.ID)
+	if after.ChangeState != delegation.ChangeDiscarded {
+		t.Fatalf("состояние изменений %q, ожидалось discarded", after.ChangeState)
+	}
+}
+
+// Исполнитель ничего не изменил — так и записано, и решать владельцу нечего.
+func TestNoChangesNeedNoDecision(t *testing.T) {
+	script := `cat > "$OUT_DIR/last-message.txt" <<'REPORT'
+{"summary":"менять нечего","findings":[],"limitations":"нет"}
+REPORT`
+	h := newHarness(t, &fakeAdapter{script: script, model: freeModel()})
+	h.gitWorkspace(t)
+
+	p := h.proposeWrite(t, "посмотреть и, если надо, поправить")
+	h.approveAndStart(t, p)
+	ctx := context.Background()
+	waitFor(t, "поручение завершилось", func() bool {
+		o, err := h.deleg.Get(ctx, p.Order.ID)
+		return err == nil && (o.State == delegation.StateCompleted || o.State == delegation.StateFailed)
+	})
+
+	o, _ := h.deleg.Get(ctx, p.Order.ID)
+	if o.ChangeState != delegation.ChangeNone {
+		t.Fatalf("состояние изменений %q, ожидалось none: решать владельцу нечего", o.ChangeState)
+	}
+	if _, err := h.deleg.ApplyChanges(ctx, p.Order.ID, "",
+		event.Actor{Type: event.ActorPerson}); err == nil {
+		t.Fatal("применение пустого набора изменений должно быть отказом")
+	}
+}
+
+// Без git контролируемая запись не начинается, и причина названа.
+func TestControlledWriteRefusedWithoutGit(t *testing.T) {
+	h := newHarness(t, &fakeAdapter{script: "true", model: freeModel()})
+	// Каталог намеренно не превращён в репозиторий.
+
+	p := h.proposeWrite(t, "поправить")
+	ctx := context.Background()
+	if _, err := h.deleg.Approve(ctx, p.Approval.ID, "test",
+		event.Actor{Type: event.ActorPerson}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := h.deleg.Start(ctx, p.Order.ID, event.Actor{Type: event.ActorPerson})
+	if err == nil {
+		t.Fatal("запуск с записью начался в каталоге без git")
+	}
+	if !strings.Contains(err.Error(), "git") {
+		t.Fatalf("причина отказа неясна: %v", err)
+	}
+
+	o, _ := h.deleg.Get(ctx, p.Order.ID)
+	if o.State != delegation.StateFailed {
+		t.Fatalf("поручение осталось в состоянии %q вместо failed", o.State)
+	}
 }

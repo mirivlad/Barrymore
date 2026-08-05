@@ -20,6 +20,26 @@ type preparePayload struct {
 	WorkspaceBaseline   string    `json:"workspace_baseline"`
 	State               string    `json:"state"`
 	At                  time.Time `json:"at"`
+	// Копия рабочего каталога для контролируемой записи.
+	WorkCopyPath     string `json:"work_copy_path,omitempty"`
+	WorkCopyBranch   string `json:"work_copy_branch,omitempty"`
+	WorkCopyBaseline string `json:"work_copy_baseline,omitempty"`
+}
+
+// changeCollectedPayload — что исполнитель сделал в копии.
+type changeCollectedPayload struct {
+	OrderID string    `json:"order_id"`
+	Change  Change    `json:"change"`
+	At      time.Time `json:"at"`
+}
+
+// changeDecidedPayload — решение владельца о судьбе изменений.
+type changeDecidedPayload struct {
+	OrderID string `json:"order_id"`
+	// State: applied либо discarded.
+	State string    `json:"state"`
+	Note  string    `json:"note,omitempty"`
+	At    time.Time `json:"at"`
 }
 
 type statePayload struct {
@@ -100,14 +120,60 @@ func applyPrepared(ctx context.Context, tx *sql.Tx, p preparePayload) error {
 	_, err := tx.ExecContext(ctx, `
 		UPDATE work_orders
 		   SET context_pack_path = ?, context_pack_checksum = ?, context_pack_revision = ?,
-		       workspace_git_head = ?, workspace_baseline = ?, state = ?, updated_at = ?
+		       workspace_git_head = ?, workspace_baseline = ?, state = ?, updated_at = ?,
+		       work_copy_path = ?, work_copy_branch = ?, work_copy_baseline = ?
 		 WHERE id = ?`,
 		p.ContextPackPath, p.ContextPackChecksum, p.ContextPackRevision,
-		p.WorkspaceGitHead, p.WorkspaceBaseline, p.State, ts(p.At), p.OrderID)
+		p.WorkspaceGitHead, p.WorkspaceBaseline, p.State, ts(p.At),
+		p.WorkCopyPath, p.WorkCopyBranch, p.WorkCopyBaseline, p.OrderID)
 	if err != nil {
 		return fmt.Errorf("проекция подготовки поручения %s: %w", p.OrderID, err)
 	}
 	return nil
+}
+
+func applyChangeCollected(ctx context.Context, tx *sql.Tx, p changeCollectedPayload) error {
+	summary, _ := json.Marshal(p.Change)
+	state := ChangeCollected
+	if p.Change.Empty() {
+		// Ничего не изменил — так и записано. Пустой набор изменений не
+		// должен ждать решения владельца: решать там нечего.
+		state = ChangeNone
+	}
+	_, err := tx.ExecContext(ctx, `
+		UPDATE work_orders SET change_state = ?, change_summary = ?, updated_at = ?
+		 WHERE id = ?`, state, string(summary), ts(p.At), p.OrderID)
+	if err != nil {
+		return fmt.Errorf("проекция изменений поручения %s: %w", p.OrderID, err)
+	}
+	return nil
+}
+
+func projectChangeCollected(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
+	var p changeCollectedPayload
+	if err := env.Decode(&p); err != nil {
+		return err
+	}
+	return applyChangeCollected(ctx, tx, p)
+}
+
+func applyChangeDecided(ctx context.Context, tx *sql.Tx, p changeDecidedPayload) error {
+	_, err := tx.ExecContext(ctx, `
+		UPDATE work_orders
+		   SET change_state = ?, change_decided_at = ?, change_decision_note = ?, updated_at = ?
+		 WHERE id = ?`, p.State, ts(p.At), p.Note, ts(p.At), p.OrderID)
+	if err != nil {
+		return fmt.Errorf("проекция решения об изменениях %s: %w", p.OrderID, err)
+	}
+	return nil
+}
+
+func projectChangeDecided(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
+	var p changeDecidedPayload
+	if err := env.Decode(&p); err != nil {
+		return err
+	}
+	return applyChangeDecided(ctx, tx, p)
 }
 
 func projectPrepared(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
@@ -332,7 +398,9 @@ const selectOrderColumns = `
 	       context_pack_path, context_pack_checksum, context_pack_revision, operational_contract,
 	       acceptance_criteria, constraints_json, required_artifacts, created_at, updated_at,
 	       approved_at, started_at, finished_at, outcome, failure_reason, revision,
-	       model, model_cost_tier, model_rationale
+	       model, model_cost_tier, model_rationale,
+	       work_copy_path, work_copy_branch, work_copy_baseline,
+	       change_state, change_summary, change_decided_at, change_decision_note
 	FROM work_orders`
 
 type scanner interface{ Scan(dest ...any) error }
@@ -344,17 +412,25 @@ func scanOrder(row scanner) (WorkOrder, error) {
 		contract, criteria, constraints, artifacts string
 		createdAt, updatedAt                       string
 		approvedAt, startedAt, finishedAt          sql.NullString
+		changeSummary                              string
+		changeDecidedAt                            sql.NullString
 	)
 	err := row.Scan(&o.ID, &o.ThreadID, &o.Title, &o.Goal, &o.Why, &o.State, &o.WorkerID,
 		&o.WorkerRationale, &o.TrustLevel, &audit, &o.WorkspaceRoot, &o.WorkspaceGitHead,
 		&o.WorkspaceBaseline, &o.ContextPackPath, &o.ContextPackChecksum, &o.ContextPackRevision,
 		&contract, &criteria, &constraints, &artifacts, &createdAt, &updatedAt,
 		&approvedAt, &startedAt, &finishedAt, &o.Outcome, &o.FailureReason, &o.Revision,
-		&o.Model, &o.ModelCostTier, &o.ModelRationale)
+		&o.Model, &o.ModelCostTier, &o.ModelRationale,
+		&o.WorkCopyPath, &o.WorkCopyBranch, &o.WorkCopyBaseline,
+		&o.ChangeState, &changeSummary, &changeDecidedAt, &o.ChangeDecisionNote)
 	if err != nil {
 		return WorkOrder{}, err
 	}
 	o.AuditOnly = audit == 1
+	_ = json.Unmarshal([]byte(changeSummary), &o.ChangeSummary)
+	if o.ChangeDecidedAt, err = parseTSPtr(changeDecidedAt); err != nil {
+		return WorkOrder{}, err
+	}
 	if err := json.Unmarshal([]byte(contract), &o.Contract); err != nil {
 		return WorkOrder{}, fmt.Errorf("разбор контракта поручения %s: %w", o.ID, err)
 	}

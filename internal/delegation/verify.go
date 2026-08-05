@@ -96,6 +96,25 @@ func (s *Service) Finalize(ctx context.Context, orderID, runID string) error {
 		}
 	}
 
+	// Изменения из копии собираются до проверок: одна из них смотрит, появились
+	// ли они там, где должны были появиться.
+	if !order.AuditOnly && order.WorkCopyPath != "" {
+		change, err := CollectChange(ctx, WorkCopy{
+			Path: order.WorkCopyPath, Source: order.WorkspaceRoot,
+			Branch: order.WorkCopyBranch, Baseline: order.WorkCopyBaseline,
+		})
+		if err != nil {
+			s.log.Error("изменения из копии не собраны", "order", orderID, "error", err)
+		} else if err := s.recordChange(ctx, orderID, change); err != nil {
+			return err
+		} else {
+			order.ChangeSummary = change
+			if !change.Empty() {
+				order.ChangeState = ChangeCollected
+			}
+		}
+	}
+
 	checks := s.runChecks(ctx, order, run, artifacts, after, diff)
 
 	passed := true
@@ -285,6 +304,36 @@ func (s *Service) runChecks(ctx context.Context, order WorkOrder, run WorkerRun,
 		} else {
 			record("неизменность рабочего каталога", VerifyFailed,
 				"каталог изменён: "+strings.Join(diff.Paths(), ", "))
+		}
+	}
+
+	// 4b. Поручение с записью: изменения собраны и ждут решения владельца.
+	//
+	// Каталог владельца при этом обязан остаться нетронутым — исполнитель
+	// работал в копии. Проверка та же, что и для audit-only, потому что
+	// требование то же самое.
+	if !order.AuditOnly {
+		switch {
+		case order.WorkCopyPath == "":
+			record("изменения исполнителя", VerifyFailed,
+				"копия рабочего каталога не подготовлена, изменениям взяться неоткуда")
+		case order.ChangeSummary.Empty():
+			record("изменения исполнителя", VerifySkipped,
+				"исполнитель ничего не изменил")
+		default:
+			record("изменения исполнителя", VerifyPassed, fmt.Sprintf(
+				"изменено файлов: %d (+%d/−%d); ждут вашего решения",
+				len(order.ChangeSummary.Files),
+				order.ChangeSummary.Insertions, order.ChangeSummary.Deletions))
+		}
+		if order.WorkspaceBaseline != "" {
+			if after.Digest == order.WorkspaceBaseline {
+				record("каталог владельца не тронут", VerifyPassed,
+					"исполнитель работал в копии; оригинал совпадает с исходным слепком")
+			} else {
+				record("каталог владельца не тронут", VerifyFailed,
+					"каталог изменён в обход копии: "+strings.Join(diff.Paths(), ", "))
+			}
 		}
 	}
 

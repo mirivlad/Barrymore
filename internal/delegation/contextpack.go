@@ -46,6 +46,9 @@ type ContextPack struct {
 	VerificationCommands []string        `json:"verification_commands"`
 	RequiredReport       []string        `json:"required_report"`
 	ReportSchema         json.RawMessage `json:"report_schema,omitempty"`
+	// Notes — то, что исполнителю нужно знать о самой обстановке работы,
+	// а не о задаче: например, что он пишет в копию, а не в каталог владельца.
+	Notes []string `json:"notes,omitempty"`
 }
 
 // PackDecision — решение в пакете.
@@ -118,7 +121,7 @@ func BuildContextPack(order WorkOrder, detail thread.Detail, ws WorkspaceState, 
 		WorktreePolicy: "read-only", Dirty: ws.GitDirty,
 	}
 	if !order.AuditOnly {
-		p.Workspace.WorktreePolicy = "isolated-worktree"
+		p.Workspace.WorktreePolicy = "isolated-copy"
 	}
 
 	if order.AuditOnly {
@@ -133,6 +136,26 @@ func BuildContextPack(order WorkOrder, detail thread.Detail, ws WorkspaceState, 
 			"устанавливать зависимости",
 			"обращаться к сети помимо собственного провайдера модели",
 		}
+	} else {
+		// Исполнитель должен знать, что работает в копии. Иначе он попытается
+		// сделать то, чего от него не ждут: закоммитить, отправить, слить —
+		// и потратит попытки на упирание в запрет.
+		p.AllowedActions = []string{
+			"читать и изменять файлы рабочего каталога",
+			"создавать и удалять файлы в нём",
+			"запускать сборку и тесты",
+			"вернуть отчёт по заданной схеме",
+		}
+		p.ForbiddenActions = []string{
+			"выполнять git commit и git push: изменения собирает Бэрримор",
+			"менять историю репозитория",
+			"выходить за пределы рабочего каталога",
+			"обращаться к сети помимо собственного провайдера модели",
+		}
+		p.Notes = append(p.Notes,
+			"Это копия каталога владельца, а не он сам. Изменения не попадут "+
+				"к владельцу автоматически: он посмотрит их и решит сам. "+
+				"Коммитить не нужно — достаточно оставить файлы в нужном виде.")
 	}
 	return p
 }
@@ -203,8 +226,21 @@ func (p ContextPack) Prompt() string {
 		for _, a := range p.ForbiddenActions {
 			b.WriteString("- " + a + "\n")
 		}
-		b.WriteString("\nЗапрет обеспечивается изоляцией файловой системы: " +
-			"попытка записи завершится ошибкой. Это ожидаемо, обходить её не нужно.\n\n")
+		// Про изоляцию говорится только там, где она действительно запрещает
+		// запись. При контролируемой записи запись разрешена, и эта фраза
+		// сбивала бы исполнителя с толку.
+		if p.Workspace.WorktreePolicy == "read-only" {
+			b.WriteString("\nЗапрет обеспечивается изоляцией файловой системы: " +
+				"попытка записи завершится ошибкой. Это ожидаемо, обходить её не нужно.\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(p.Notes) > 0 {
+		b.WriteString("## Об обстановке\n")
+		for _, n := range p.Notes {
+			b.WriteString(n + "\n")
+		}
+		b.WriteString("\n")
 	}
 	if len(p.AcceptanceCriteria) > 0 {
 		b.WriteString("## Критерии приёмки\n")

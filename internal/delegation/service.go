@@ -358,6 +358,26 @@ func (s *Service) Start(ctx context.Context, orderID string, actor event.Actor) 
 		return WorkerRun{}, err
 	}
 
+	// Контролируемая запись: исполнитель получает копию, а не каталог владельца.
+	// До решения владельца его каталог не трогают вообще, поэтому проверка
+	// «ничего не изменилось» остаётся в силе и для поручений с записью.
+	workspaceForRun := order.WorkspaceRoot
+	var copyInfo WorkCopy
+	if !order.AuditOnly {
+		copyInfo, err = PrepareWorkCopy(ctx, order.WorkspaceRoot,
+			filepath.Join(runDir, "workcopy"), "barrymore/"+shortID(order.ID))
+		if err != nil {
+			if markErr := s.fail(ctx, order.ID,
+				"копия рабочего каталога не подготовлена: "+err.Error()); markErr != nil {
+				s.log.Error("состояние поручения не обновлено", "order", order.ID, "error", markErr)
+			}
+			return WorkerRun{}, err
+		}
+		workspaceForRun = copyInfo.Path
+		s.log.Info("подготовлена копия для контролируемой записи",
+			"order", order.ID, "files", copyInfo.FileCount, "path", copyInfo.Path)
+	}
+
 	detail, err := s.threads.Detail(ctx, order.ThreadID)
 	if err != nil {
 		return WorkerRun{}, err
@@ -372,7 +392,7 @@ func (s *Service) Start(ctx context.Context, orderID string, actor event.Actor) 
 	plan, err := adapter.Plan(ctx, worker.Installation{
 		ExecutablePath: w.ExecutablePath, Version: w.Version, AuthState: w.AuthState,
 	}, worker.RunRequest{
-		RunID: runID, WorkDir: order.WorkspaceRoot, Prompt: pack.Prompt(),
+		RunID: runID, WorkDir: workspaceForRun, Prompt: pack.Prompt(),
 		AuditOnly: order.AuditOnly, OutputDir: filepath.Join(runDir, runner.OutputDir),
 		ScratchDir:       scratchDir,
 		Model:            order.Model,
@@ -387,6 +407,8 @@ func (s *Service) Start(ctx context.Context, orderID string, actor event.Actor) 
 		ContextPackRevision: order.ContextPackRevision + 1,
 		WorkspaceGitHead:    baseline.GitHead, WorkspaceBaseline: baseline.Digest,
 		State: StatePreparing, At: s.clock.Now(),
+		WorkCopyPath: copyInfo.Path, WorkCopyBranch: copyInfo.Branch,
+		WorkCopyBaseline: copyInfo.Baseline,
 	}
 	if _, err := s.journal.Write(ctx, func(tx *sql.Tx, tw *event.TxWriter) error {
 		if _, err := tw.Append(ctx, event.Request{
@@ -403,7 +425,7 @@ func (s *Service) Start(ctx context.Context, orderID string, actor event.Actor) 
 	started, err := s.runner.Start(ctx, runner.StartRequest{
 		RunID: runID, WorkOrderID: order.ID, WorkerID: order.WorkerID,
 		Adapter: adapter, Plan: plan, RunDir: runDir,
-		AuditOnly: order.AuditOnly, Workspace: order.WorkspaceRoot,
+		AuditOnly: order.AuditOnly, Workspace: workspaceForRun,
 	})
 	if err != nil {
 		if markErr := s.fail(ctx, order.ID, "запуск исполнителя не удался: "+err.Error()); markErr != nil {
@@ -644,14 +666,18 @@ func auditSuffix(auditOnly bool) string {
 	if auditOnly {
 		return " только для чтения"
 	}
-	return " с правом записи"
+	// Формулировка важна: «с правом записи» звучит так, будто исполнитель
+	// сейчас полезет в каталог владельца. Он полезет в копию, и до отдельного
+	// решения владельца ничего оттуда не выйдет.
+	return " с записью в копию каталога; изменения дойдут до вас только по " +
+		"вашему отдельному решению"
 }
 
 func writeLevel(auditOnly bool) string {
 	if auditOnly {
 		return "none"
 	}
-	return "worktree"
+	return "изолированная копия каталога"
 }
 
 func joinReasons(reasons []string) string {
@@ -682,4 +708,84 @@ func (s *Service) Projections(reg *projection.Registry) {
 	reg.On(EvVerifyStarted, projectVerification)
 	reg.On(EvVerifyCompleted, projectVerificationResult)
 	reg.On(EvStateChanged, projectState)
+	reg.On(EvChangeCollected, projectChangeCollected)
+	reg.On(EvChangeDecided, projectChangeDecided)
+}
+
+// ---------- контролируемая запись ----------
+
+// recordChange сохраняет то, что исполнитель сделал в копии.
+func (s *Service) recordChange(ctx context.Context, orderID string, change Change) error {
+	p := changeCollectedPayload{OrderID: orderID, Change: change, At: s.clock.Now()}
+	_, err := s.journal.Write(ctx, func(tx *sql.Tx, w *event.TxWriter) error {
+		if _, err := w.Append(ctx, event.Request{
+			StreamType: StreamType, StreamID: orderID, ExpectedRevision: event.AnyRevision,
+			EventType: EvChangeCollected, Actor: event.Actor{Type: event.ActorRuntime},
+			Payload: p,
+		}); err != nil {
+			return err
+		}
+		return applyChangeCollected(ctx, tx, p)
+	})
+	return err
+}
+
+// ApplyChanges переносит изменения исполнителя в каталог владельца.
+//
+// Отдельное действие по отдельному решению (05_STAFF_AND_DELEGATION §10).
+// Ничего не коммитится: владелец смотрит наложенное своими инструментами
+// и решает сам, а откат остаётся обычным `git checkout`.
+func (s *Service) ApplyChanges(ctx context.Context, orderID, note string, actor event.Actor) (ApplyResult, error) {
+	order, err := s.Get(ctx, orderID)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if order.ChangeState != ChangeCollected {
+		return ApplyResult{}, fmt.Errorf(
+			"применять нечего: изменения в состоянии %q", order.ChangeState)
+	}
+	if order.ChangeSummary.Truncated {
+		return ApplyResult{}, errors.New(
+			"дифф был обрезан по размеру, применить его целиком нельзя: " +
+				"изменения лежат в копии, перенесите их своими инструментами")
+	}
+
+	res, err := ApplyChange(ctx, order.WorkspaceRoot, order.ChangeSummary.Patch)
+	if err != nil {
+		return ApplyResult{}, err
+	}
+	if err := s.decideChange(ctx, orderID, ChangeApplied, note, actor); err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+// DiscardChanges отказывается от изменений и убирает копию.
+func (s *Service) DiscardChanges(ctx context.Context, orderID, note string, actor event.Actor) error {
+	order, err := s.Get(ctx, orderID)
+	if err != nil {
+		return err
+	}
+	if order.WorkCopyPath != "" {
+		if err := RemoveWorkCopy(WorkCopy{Path: order.WorkCopyPath}); err != nil {
+			// Не смертельно: решение владельца важнее уборки, а копия лежит
+			// в каталоге запуска и никому не мешает.
+			s.log.Warn("копия не удалена", "order", orderID, "error", err)
+		}
+	}
+	return s.decideChange(ctx, orderID, ChangeDiscarded, note, actor)
+}
+
+func (s *Service) decideChange(ctx context.Context, orderID, state, note string, actor event.Actor) error {
+	p := changeDecidedPayload{OrderID: orderID, State: state, Note: note, At: s.clock.Now()}
+	_, err := s.journal.Write(ctx, func(tx *sql.Tx, w *event.TxWriter) error {
+		if _, err := w.Append(ctx, event.Request{
+			StreamType: StreamType, StreamID: orderID, ExpectedRevision: event.AnyRevision,
+			EventType: EvChangeDecided, Actor: actor, Payload: p,
+		}); err != nil {
+			return err
+		}
+		return applyChangeDecided(ctx, tx, p)
+	})
+	return err
 }

@@ -67,6 +67,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/work-orders/{id}/start", s.startOrder)
 	mux.HandleFunc("POST /api/v1/work-orders/{id}/cancel", s.cancelOrder)
 	mux.HandleFunc("GET /api/v1/work-orders/{id}/report", s.orderReport)
+	mux.HandleFunc("POST /api/v1/work-orders/{id}/changes/apply", s.applyChanges)
+	mux.HandleFunc("POST /api/v1/work-orders/{id}/changes/discard", s.discardChanges)
 
 	mux.HandleFunc("GET /api/v1/approvals/pending", s.pendingApprovals)
 	mux.HandleFunc("POST /api/v1/approvals/{id}/grant", s.grantApproval)
@@ -487,6 +489,12 @@ func (s *Server) listOrders(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "поручения недоступны", err.Error())
 		return
 	}
+	// Дифф из списка вычищается: сотня поручений с патчами по полмегабайта
+	// превратила бы обычное обновление экрана в пересылку десятков мегабайт.
+	// Сам дифф отдаётся при открытии поручения.
+	for i := range items {
+		items[i].ChangeSummary.Patch = ""
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
@@ -499,6 +507,9 @@ func (s *Server) proposeOrder(w http.ResponseWriter, r *http.Request) {
 		WorkspaceRoot string   `json:"workspace_root"`
 		WorkerID      string   `json:"worker_id"`
 		Constraints   []string `json:"constraints"`
+		// AllowWrite включает контролируемую запись: исполнитель работает
+		// в копии каталога, изменения доходят до владельца отдельным решением.
+		AllowWrite bool `json:"allow_write"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -514,8 +525,9 @@ func (s *Server) proposeOrder(w http.ResponseWriter, r *http.Request) {
 		ThreadID: body.ThreadID, Title: body.Title, Goal: body.Goal, Why: body.Why,
 		WorkspaceRoot: body.WorkspaceRoot, WorkerID: body.WorkerID,
 		Constraints: body.Constraints,
-		// Первое поручение всегда только на чтение (12_BOOTSTRAP_PROMPT).
-		AuditOnly: true,
+		// Умолчание — только чтение. Запись включается осознанно и явно:
+		// молчание запроса не является разрешением менять чужие файлы.
+		AuditOnly: !body.AllowWrite,
 		Actor:     event.Actor{Type: event.ActorPerson},
 	})
 	if err != nil {
@@ -1136,4 +1148,44 @@ func writeDomainError(w http.ResponseWriter, err error) {
 	default:
 		writeProblem(w, http.StatusInternalServerError, "внутренняя ошибка", err.Error())
 	}
+}
+
+// ---------- изменения исполнителя ----------
+
+// applyChanges переносит изменения из копии в каталог владельца.
+//
+// Отдельное действие по отдельному решению: до него каталог владельца не
+// тронут вообще.
+func (s *Server) applyChanges(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Note string `json:"note"`
+	}
+	if r.ContentLength > 0 && !decode(w, r, &body) {
+		return
+	}
+	res, err := s.app.Delegation.ApplyChanges(r.Context(), r.PathValue("id"), body.Note,
+		event.Actor{Type: event.ActorPerson})
+	if err != nil {
+		writeProblem(w, http.StatusConflict, "изменения не применены", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) discardChanges(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Note string `json:"note"`
+	}
+	if r.ContentLength > 0 && !decode(w, r, &body) {
+		return
+	}
+	if err := s.app.Delegation.DiscardChanges(r.Context(), r.PathValue("id"), body.Note,
+		event.Actor{Type: event.ActorPerson}); err != nil {
+		writeProblem(w, http.StatusConflict, "изменения не отброшены", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "discarded",
+		"note":   "копия удалена; каталог остался таким, каким был",
+	})
 }

@@ -303,7 +303,7 @@
 
   <section id="tab-orders" hidden>
     <div class="card">
-      <h2>Новое поручение — аудит без изменений</h2>
+      <h2>Новое поручение</h2>
       <div class="row">
         <div class="grow"><label for="wo-thread">Нить</label>
           <select id="wo-thread"></select></div>
@@ -314,8 +314,12 @@
         <textarea id="wo-goal" placeholder="что именно нужно выяснить"></textarea></div>
       <div class="row" style="margin-top:10px">
         <button class="act" id="wo-create">Сформировать поручение</button>
-        <span class="muted">первое поручение всегда только на чтение</span>
+        <label class="switch"><input type="checkbox" id="wo-write"> разрешить менять код</label>
       </div>
+      <p class="muted" id="wo-write-note" style="margin:8px 0 0">
+        Без этой отметки исполнитель только читает. С ней он работает
+        в копии каталога, а изменения дойдут до вас только по вашему решению.
+      </p>
       <div id="wo-candidates"></div>
     </div>
     <div class="card">

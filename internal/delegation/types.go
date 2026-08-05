@@ -122,6 +122,18 @@ func DefaultContract(artifacts []string) OperationalContract {
 	}
 }
 
+// Состояния изменений, сделанных исполнителем.
+const (
+	// ChangeNone — изменений не было или поручение только на чтение.
+	ChangeNone = "none"
+	// ChangeCollected — изменения собраны и ждут решения владельца.
+	ChangeCollected = "collected"
+	// ChangeApplied — владелец применил их к своему каталогу.
+	ChangeApplied = "applied"
+	// ChangeDiscarded — владелец отказался, копия удалена.
+	ChangeDiscarded = "discarded"
+)
+
 // WorkOrder — формализованное поручение.
 type WorkOrder struct {
 	ID                  string              `json:"id"`
@@ -145,17 +157,28 @@ type WorkOrder struct {
 	Constraints         []string            `json:"constraints"`
 	RequiredArtifacts   []string            `json:"required_artifacts"`
 	// Model и стоимость выбираются Бэрримором, а не исполнителем.
-	Model          string     `json:"model,omitempty"`
-	ModelCostTier  string     `json:"model_cost_tier,omitempty"`
-	ModelRationale string     `json:"model_rationale,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	ApprovedAt     *time.Time `json:"approved_at,omitempty"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
-	Outcome        string     `json:"outcome,omitempty"`
-	FailureReason  string     `json:"failure_reason,omitempty"`
-	Revision       int64      `json:"revision"`
+	Model          string `json:"model,omitempty"`
+	ModelCostTier  string `json:"model_cost_tier,omitempty"`
+	ModelRationale string `json:"model_rationale,omitempty"`
+	// Копия рабочего каталога для контролируемой записи. Пуста у поручений
+	// только на чтение: там копировать нечего.
+	WorkCopyPath     string `json:"work_copy_path,omitempty"`
+	WorkCopyBranch   string `json:"work_copy_branch,omitempty"`
+	WorkCopyBaseline string `json:"work_copy_baseline,omitempty"`
+	// ChangeState — судьба изменений, отдельная от состояния поручения:
+	// поручение может быть выполнено, а изменения ещё не рассмотрены.
+	ChangeState        string     `json:"change_state"`
+	ChangeSummary      Change     `json:"change_summary,omitempty"`
+	ChangeDecidedAt    *time.Time `json:"change_decided_at,omitempty"`
+	ChangeDecisionNote string     `json:"change_decision_note,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	ApprovedAt         *time.Time `json:"approved_at,omitempty"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	FinishedAt         *time.Time `json:"finished_at,omitempty"`
+	Outcome            string     `json:"outcome,omitempty"`
+	FailureReason      string     `json:"failure_reason,omitempty"`
+	Revision           int64      `json:"revision"`
 }
 
 // WorkerRun — конкретный запуск исполнителя.
@@ -261,6 +284,9 @@ const (
 	EvVerifyStarted     = "verification.started"
 	EvVerifyCompleted   = "verification.completed"
 	EvStateChanged      = "work_order.state.changed"
+	// Изменения исполнителя: собраны, применены владельцем либо отброшены.
+	EvChangeCollected = "work_order.change.collected"
+	EvChangeDecided   = "work_order.change.decided"
 )
 
 // StreamType — тип потока событий поручения.

@@ -849,6 +849,7 @@ $("wo-create").addEventListener("click", async () => {
         workspace_root: $("wo-root").value.trim(),
         worker_id: "",
         constraints: [],
+        allow_write: $("wo-write").checked,
       }),
     });
     $("wo-candidates").innerHTML = `
@@ -876,6 +877,83 @@ $("wo-create").addEventListener("click", async () => {
        <div class="muted" style="margin-top:6px">${esc(err.message)}</div></div>`;
   }
 });
+
+// changesBlock показывает, что исполнитель сделал, и даёт решить судьбу.
+//
+// До решения владельца его каталог не тронут вообще — об этом сказано прямо,
+// потому что «поручение с записью» звучит так, будто уже что-то изменилось.
+function changesBlock(o) {
+  if (o.audit_only) return "";
+  const ch = o.change_summary || {};
+  const files = ch.files || [];
+
+  if (o.change_state === "applied") {
+    return `<h2 style="margin-top:16px">Изменения</h2>
+      <div>${tag("применены", "ok")} <span class="muted">${when(o.change_decided_at)}
+      · наложены в ваш каталог и остались незакоммиченными</span></div>
+      ${o.change_decision_note ? `<div class="muted">${esc(o.change_decision_note)}</div>` : ""}`;
+  }
+  if (o.change_state === "discarded") {
+    return `<h2 style="margin-top:16px">Изменения</h2>
+      <div>${tag("отброшены", "")} <span class="muted">${when(o.change_decided_at)}
+      · копия удалена, каталог остался таким, каким был</span></div>`;
+  }
+  if (!files.length) {
+    return `<h2 style="margin-top:16px">Изменения</h2>
+      <p class="muted">Исполнитель ничего не изменил — решать нечего.</p>`;
+  }
+
+  return `
+    <h2 style="margin-top:16px">Изменения ждут вашего решения</h2>
+    <p class="muted">Исполнитель работал в копии. Ваш каталог пока не тронут:
+      ${files.length} файлов, +${ch.insertions || 0}/−${ch.deletions || 0}.</p>
+    <ul class="plain">${files.map((f) => `
+      <li><span class="muted">${esc(f.status)}</span> <code>${esc(f.path)}</code></li>`).join("")}</ul>
+    ${
+      ch.truncated
+        ? `<div class="notes" style="margin-top:8px">Дифф слишком велик и показан
+           не целиком, поэтому применить его отсюда нельзя. Изменения лежат
+           в копии: <code>${esc(o.work_copy_path || "")}</code></div>`
+        : `<details style="margin-top:8px">
+             <summary class="muted">посмотреть дифф</summary>
+             <pre>${esc(ch.patch || "")}</pre>
+           </details>`
+    }
+    <div class="row" style="margin-top:10px">
+      ${
+        ch.truncated
+          ? ""
+          : `<button class="act" onclick="applyChanges('${esc(o.id)}')">Применить к моему каталогу</button>`
+      }
+      <button class="ghost" onclick="discardChanges('${esc(o.id)}')">Отбросить</button>
+      ${techNote(`ветка в копии: ${esc(o.work_copy_branch || "—")}`)}
+    </div>`;
+}
+
+window.applyChanges = async (id) => {
+  if (!confirm("Наложить изменения на ваш каталог? Они останутся незакоммиченными.")) return;
+  try {
+    const res = await api(`/api/v1/work-orders/${id}/changes/apply`, {
+      method: "POST", body: JSON.stringify({ note: "принято владельцем" }),
+    });
+    alert(res.detail || "Изменения наложены.");
+  } catch (err) {
+    alert(`Не применено: ${err.message}`);
+  }
+  openOrder(id);
+};
+
+window.discardChanges = async (id) => {
+  if (!confirm("Отбросить изменения? Копия будет удалена, каталог останется прежним.")) return;
+  try {
+    await api(`/api/v1/work-orders/${id}/changes/discard`, {
+      method: "POST", body: JSON.stringify({ note: "отклонено владельцем" }),
+    });
+  } catch (err) {
+    alert(`Не отброшено: ${err.message}`);
+  }
+  openOrder(id);
+};
 
 window.openOrder = async (id) => {
   const box = $("order-detail");
@@ -916,6 +994,8 @@ window.openOrder = async (id) => {
         <tr><th>Пакет контекста</th><td class="muted">${esc(o.context_pack_checksum || "не собран")}</td></tr>
         ${o.failure_reason ? `<tr><th>Причина неудачи</th><td>${esc(o.failure_reason)}</td></tr>` : ""}
       </table>
+
+      ${changesBlock(o)}
 
       ${
         last
