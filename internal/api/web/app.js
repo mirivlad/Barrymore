@@ -1188,94 +1188,294 @@ window.showReport = async (id) => {
 
 
 // ---------- приёмная ----------
+//
+// Приёмная — это разговор, и ничего кроме него. Всё, что произошло в доме,
+// пока владелец разговаривал, лежит справа и открывается по кнопке.
+//
+// Прежняя вёрстка складывала в вертикальный поток карточку нити, уведомления
+// и предложения поручений — и собеседник оказывался где-то посередине
+// операторского дашборда. Разделение простое: центр отвечает на «с кем я
+// сейчас говорю», сайдбар — на «что случилось, пока мы говорили».
 
 let currentConversation = null;
 let sending = false;
 
-// Локальная модель отвечает десятками секунд: интерфейс обязан честно
-// показывать ожидание, а не притворяться, что ничего не происходит.
 const PROVIDER_TONE = { ready: "ok", unreachable: "bad", not_configured: "warn", broken: "bad" };
 
-// ---------- инициатива ----------
+// ---------- сайдбар дел ----------
 
-// loadNotices показывает то, о чём Бэрримор решил сказать сам.
-//
-// 07_USER_EXPERIENCE §4: каждое обращение отвечает на «почему сейчас».
-// Поэтому причина показывается всегда и наравне с заголовком, а не прячется
-// под раскрытием: без неё обращение неотличимо от напоминания ради напоминания.
-const NOTICE_TONE = { urgent: "bad", attention: "warn", routine: "" };
-const LEVEL_LABEL = {
-  urgent: "нужно ваше решение",
-  attention: "стоит знать",
-  routine: "к сведению",
+// Три раздела отвечают на три разных вопроса и не смешиваются: «что от меня
+// требуется», «что изменилось без меня», «что происходит прямо сейчас».
+const AFFAIR_GROUPS = [
+  { id: "needs", title: "Требует вашего решения", empty: "Ничего не ждёт вашего слова." },
+  { id: "changed", title: "Изменилось", empty: "Пока ничего не менялось." },
+  { id: "running", title: "Сейчас выполняется", empty: "Никто ничего не делает." },
+];
+
+const affairsBox = $("affairs");
+const affairsToggle = $("affairs-toggle");
+
+// Раскрытые дела и заметки о них переживают перерисовку: список обновляется
+// каждые десять секунд, и захлопывать открытое владельцем под руками нельзя.
+const openAffairs = new Set();
+const affairNotes = new Map();
+let affairItems = [];
+let turnAffairs = [];
+let detailKind = "";
+
+function setAffairs(open) {
+  affairsBox.hidden = !open;
+  document.body.classList.toggle("affairs-open", open);
+  affairsToggle.setAttribute("aria-expanded", String(open));
+  if (!open) closeDetail();
+}
+
+function affairsOpen() {
+  return !affairsBox.hidden;
+}
+
+affairsToggle.addEventListener("click", () => setAffairs(!affairsOpen()));
+
+window.closeDetail = () => {
+  detailKind = "";
+  $("affairs-detail").innerHTML = "";
 };
 
-async function loadNotices() {
-  const box = $("notices");
+$("affairs-groups").addEventListener("click", (e) => {
+  const head = e.target.closest(".affair-head");
+  if (!head) return;
+  const id = head.dataset.affair;
+  if (openAffairs.has(id)) openAffairs.delete(id);
+  else openAffairs.add(id);
+  renderAffairs();
+});
+
+function affairNote(id) {
+  const note = affairNotes.get(id);
+  return note ? `<div class="notes" style="margin-top:8px">${esc(note)}</div>` : "";
+}
+
+function affairRow(it) {
+  const open = openAffairs.has(it.id);
+  return `<li class="affair">
+    <button class="affair-head" data-affair="${esc(it.id)}" aria-expanded="${open}">
+      <span class="affair-what">${esc(it.what)}</span>
+      <span class="affair-which">${esc(it.which || "вне дел")}${
+        it.when ? ` · ${ago(it.when)}` : ""
+      }${it.need ? ` · <span class="tag warn">нужно решение</span>` : ""}</span>
+    </button>
+    ${open ? `<div class="affair-body">${it.body || ""}${affairNote(it.id)}</div>` : ""}
+  </li>`;
+}
+
+// renderAffairs рисует сайдбар и счётчик на кнопке.
+//
+// Счётчик считает только то, о чём Бэрримор обращается: решения и перемены.
+// Идущая работа в счётчик не входит — она никуда не зовёт.
+function renderAffairs() {
+  const groups = AFFAIR_GROUPS.map((g) => ({
+    ...g, items: affairItems.filter((i) => i.group === g.id),
+  }));
+  const decide = groups[0].items.length;
+  const changed = groups[1].items.length;
+  const total = decide + changed;
+
+  $("affairs-count").textContent = String(total);
+  affairsToggle.classList.toggle("hot", decide > 0);
+  affairsToggle.classList.toggle("warm", decide === 0 && changed > 0);
+  affairsToggle.title = decide
+    ? `${decide} ждёт вашего решения`
+    : total ? "есть перемены" : "ничего нового";
+
+  // Значок в шапке — короткий путь в Приёмную с других вкладок. На самой
+  // Приёмной он не нужен: там уже есть кнопка дел, и два счётчика рядом
+  // читаются как противоречие.
   const badge = $("notice-badge");
-  try {
-    const d = await api("/api/v1/notices");
-    const waiting = d.waiting || [];
-    const kinds = {};
-    for (const r of d.reasons || []) kinds[r.kind] = r.label;
+  badge.hidden = total === 0 || activeTab() === "talk";
+  badge.textContent = decide ? `${decide} ждёт решения` : `${total} от Бэрримора`;
 
-    badge.hidden = waiting.length === 0;
-    badge.textContent = waiting.length ? `${waiting.length} от Бэрримора` : "";
+  $("affairs-groups").innerHTML = groups.map((g) => `
+    <h3>${esc(g.title)} <span class="count">${g.items.length}</span></h3>
+    ${
+      g.items.length
+        ? `<ul class="plain">${g.items.map(affairRow).join("")}</ul>`
+        : `<p class="empty">${esc(g.empty)}</p>`
+    }`).join("");
+}
 
-    if (!waiting.length && !d.held_count) {
-      box.hidden = true;
-      return;
-    }
-    box.hidden = false;
-    box.innerHTML = `
-      <div class="row">
-        <h2 style="margin:0">Что изменилось и что ждёт вашего решения</h2>
-        <span class="grow"></span>
-        ${techNote(esc(d.policy?.enabled ? "инициатива включена" : "инициатива выключена"))}
-      </div>
-      <ul class="plain">${waiting.map((n) => `
-        <li>
-          <div class="row">
-            ${tag(LEVEL_LABEL[n.level] || n.level, NOTICE_TONE[n.level])}
-            <strong>${esc(n.title)}</strong>
-            <span class="grow"></span>
-            <span class="muted">${ago(n.created_at)}</span>
-          </div>
-          <div class="muted" style="margin-top:4px">Почему сейчас: ${esc(n.why)}</div>
-          <div class="row" style="margin-top:6px">
-            ${
-              n.subject_type === "work_order"
-                ? `<button class="ghost" onclick="showTab('orders');openOrder('${esc(n.subject_id)}')">Открыть</button>`
-                : ""
-            }
-            ${
-              n.subject_type === "memory"
-                ? `<button class="ghost" onclick="showTab('memory')">Открыть память</button>`
-                : ""
-            }
-            <button class="ghost" onclick="readNotice('${esc(n.id)}')">Понятно</button>
-            <button class="ghost" onclick="muteNotice('${esc(n.kind)}')">Не сообщать о таком</button>
-            ${techNote(esc(kinds[n.kind] || n.kind))}
-          </div>
-        </li>`).join("")}</ul>
-      ${
-        d.held_count
-          ? `<div class="muted" style="margin-top:8px">Ещё ${d.held_count}: ${esc(d.held_reason || "")}</div>`
-          : ""
-      }`;
-  } catch {
-    box.hidden = true;
-    badge.hidden = true;
+// refreshAffairs собирает дела из всех источников сразу.
+//
+// Источник правды — сервер: предложения текущего хода живут в журнале,
+// подтверждения — в списке ожидающих, обращения — в инициативе. Браузер
+// ничего не додумывает и после перезагрузки показывает то же самое.
+async function refreshAffairs() {
+  const items = [...turnAffairs];
+  const [notices, orders, approvals, state] = await Promise.all([
+    api("/api/v1/notices").catch(() => ({})),
+    api("/api/v1/work-orders").catch(() => ({})),
+    api("/api/v1/approvals/pending").catch(() => ({})),
+    api("/api/v1/system/state").catch(() => ({})),
+  ]);
+
+  const orderByID = new Map((orders.items || []).map((o) => [o.id, o]));
+  const dealOf = (o) => (o && threadTitles.get(o.thread_id)) || (o ? o.title : "");
+
+  // Подтверждения — первое, что должен увидеть владелец: без его слова
+  // исполнитель не двинется.
+  for (const a of approvals.items || []) {
+    const o = orderByID.get(a.work_order_id);
+    items.push({
+      id: `approval-${a.id}`, group: "needs", need: true,
+      what: "Запустить исполнителя?", which: dealOf(o), when: a.requested_at,
+      body: approvalBody(a, o),
+    });
   }
+
+  for (const n of notices.waiting || []) {
+    const o = n.subject_type === "work_order" ? orderByID.get(n.subject_id) : null;
+    items.push({
+      id: `notice-${n.id}`,
+      group: n.level === "urgent" ? "needs" : "changed",
+      need: n.level === "urgent",
+      what: n.title, which: dealOf(o), when: n.created_at,
+      body: noticeBody(n),
+    });
+  }
+
+  for (const o of state.pending_changes || []) {
+    items.push({
+      id: `changes-${o.id}`, group: "needs", need: true,
+      what: "Изменения ждут вашего решения", which: dealOf(o), when: o.updated_at,
+      body: `<div>${esc(o.title)}: исполнитель поработал в копии, ваш каталог
+        не тронут.</div>
+        <div class="row">
+          <button class="ghost" onclick="showTab('orders');openOrder('${esc(o.id)}')">
+            Посмотреть изменения</button>
+        </div>
+        <div class="muted" style="margin-top:6px">Что именно изменилось, видно
+          в разделе «Поручения»: там же они применяются или отклоняются.</div>`,
+    });
+  }
+
+  // Идущая работа. Здесь нет кнопок: она не требует решения, а просто идёт.
+  for (const o of orders.items || []) {
+    if (!RUNNING_STATES.has(o.state)) continue;
+    items.push({
+      id: `run-${o.id}`, group: "running", what: o.title, which: dealOf(o),
+      when: o.started_at || o.created_at,
+      body: `<div>${esc(o.goal)}</div>
+        <div class="muted" style="margin-top:6px">${esc(say(o.state))}</div>
+        <div class="row">
+          <button class="ghost" onclick="showTab('orders');openOrder('${esc(o.id)}')">
+            Подробности поручения</button>
+        </div>`,
+    });
+  }
+
+  for (const gap of readinessGaps(state)) items.push(gap);
+
+  affairItems = items;
+  renderAffairs();
+}
+
+const RUNNING_STATES = new Set(["approved", "preparing", "running", "verifying", "awaiting_user"]);
+
+// readinessGaps говорит о том, чего не хватает, словами владельца.
+//
+// Раньше это была карточка первого знакомства посреди разговора. Но нехватка
+// рабочего каталога — не приветствие, а именно то, что требует решения:
+// без неё поручения будут отклоняться, и лучше узнать об этом здесь.
+function readinessGaps(s) {
+  if (!s || !s.conversation) return [];
+  const gaps = [];
+  if (s.conversation.status !== "ready") {
+    gaps.push({
+      id: "gap-provider", group: "needs", need: true,
+      what: "Бэрримор сейчас не разговаривает", which: "настройки",
+      body: `<div>Нити, штат, поручения и наблюдение работают без этого.
+        Разговор вернётся, как только поднимется модель.</div>
+        ${techNote(`<div style="margin-top:6px">${esc(s.conversation.reason || "")}</div>`)}
+        <div class="row">
+          <button class="ghost" onclick="showTab('settings')">Открыть настройки</button>
+        </div>`,
+    });
+  }
+  if (!(s.workspace_roots || []).length) {
+    gaps.push({
+      id: "gap-roots", group: "needs", need: true,
+      what: "Не задан ни один рабочий каталог", which: "настройки",
+      body: `<div>Пока их нет, любое поручение будет отклонено политикой:
+        доступ ко всему диску не является значением по умолчанию.</div>
+        <div class="row">
+          <button class="ghost" onclick="showTab('settings')">Разрешить каталог</button>
+        </div>`,
+    });
+  }
+  if (s.isolation && !s.isolation.bwrap) {
+    gaps.push({
+      id: "gap-isolation", group: "needs", need: true,
+      what: "Изоляция запусков недоступна", which: "хост",
+      body: `<div>Без bubblewrap поручение «только чтение» нельзя удержать
+        только на чтении, поэтому Бэрримор не запускает исполнителей вовсе.</div>`,
+    });
+  }
+  return gaps;
+}
+
+// approvalBody показывает то, что решается, без служебных подробностей.
+//
+// Заголовок подтверждения, который составляет сервер, называет модель — она
+// владельцу при решении не нужна и уезжает в технический режим. Остаётся то,
+// что действительно меняет решение: кто, где и с каким правом.
+function approvalBody(a, o) {
+  const scope = a.scope || {};
+  return `
+    <div>${esc(scope.worker || "исполнитель")} ${
+      scope.write_level === "none"
+        ? "прочитает каталог"
+        : "поработает в копии каталога"
+    } <code style="font-size:12px">${esc(scope.workspace_root || "")}</code>.</div>
+    <div style="margin-top:6px">${costTag(scope.cost_tier, false)} ${
+      o && o.audit_only ? tag("только чтение", "ok") : tag("с правкой файлов", "warn")
+    }</div>
+    ${scope.notes ? `<div class="muted" style="margin-top:6px">${esc(scope.notes)}</div>` : ""}
+    ${o && o.worker_rationale
+      ? `<div class="muted" style="margin-top:6px">${esc(o.worker_rationale)}</div>` : ""}
+    ${techNote(`<div style="margin-top:6px">${esc(a.summary || "")}</div>`)}
+    <div class="row">
+      <button class="act" onclick="approveAndStart('${esc(a.id)}','${esc(a.work_order_id)}')">
+        Подтвердить и запустить</button>
+      <button class="ghost" onclick="denyFromTalk('${esc(a.id)}')">Не сейчас</button>
+    </div>`;
+}
+
+function noticeBody(n) {
+  return `
+    <div>Почему сейчас: ${esc(n.why)}</div>
+    <div class="row">
+      ${
+        n.subject_type === "work_order"
+          ? `<button class="ghost" onclick="showTab('orders');openOrder('${esc(n.subject_id)}')">Открыть поручение</button>`
+          : ""
+      }
+      ${
+        n.subject_type === "memory"
+          ? `<button class="ghost" onclick="showTab('memory')">Открыть память</button>`
+          : ""
+      }
+      <button class="ghost" onclick="readNotice('${esc(n.id)}')">Понятно</button>
+      <button class="ghost" onclick="muteNotice('${esc(n.kind)}')">Не сообщать о таком</button>
+    </div>
+    ${techNote(`<div style="margin-top:6px">${esc(n.kind)}</div>`)}`;
 }
 
 window.readNotice = async (id) => {
   try {
     await api(`/api/v1/notices/${id}/read`, { method: "POST" });
   } catch (err) {
-    alert(err.message);
+    affairNotes.set(`notice-${id}`, err.message);
   }
-  loadNotices();
+  refreshAffairs();
 };
 
 window.muteNotice = async (kind) => {
@@ -1288,143 +1488,185 @@ window.muteNotice = async (kind) => {
   } catch (err) {
     alert(err.message);
   }
-  loadNotices();
+  refreshAffairs();
 };
 
 $("notice-badge").addEventListener("click", () => {
   showTab("talk");
-  $("notices").scrollIntoView({ behavior: "smooth", block: "start" });
+  setAffairs(true);
 });
 
-// loadWelcome показывает первое знакомство, пока разговоров ещё не было.
-//
-// Это не мастер настройки: он ничего не настраивает за владельца, а честно
-// перечисляет, что уже готово и чего не хватает, со ссылкой на то место,
-// где это правится. Прятать пробелы за бодрым «всё отлично» — то же враньё.
-async function loadWelcome(conversationCount) {
-  const box = $("welcome");
-  if (conversationCount > 0 || localStorage.getItem("barrymore.welcomed") === "1") {
-    box.hidden = true;
-    return;
-  }
-  try {
-    const s = await api("/api/v1/system/state");
-    const checks = [
-      {
-        ok: s.conversation?.status === "ready",
-        good: "Бэрримор может разговаривать.",
-        bad: "Разговорный слой не отвечает — модель ещё не поднята или не выбрана.",
-        where: "settings",
-      },
-      {
-        ok: (s.workspace_roots || []).length > 0,
-        good: `Разрешённые каталоги заданы: ${(s.workspace_roots || []).join(", ")}.`,
-        bad: "Не задан ни один рабочий каталог — поручения будут отклоняться политикой.",
-        where: "settings",
-      },
-      {
-        ok: !!s.isolation?.bwrap,
-        good: "Изоляция запусков доступна: поручения только на чтение действительно только читают.",
-        bad: "bubblewrap недоступен — поручения запускаться не будут.",
-        where: "state",
-      },
-    ];
-    box.hidden = false;
-    box.innerHTML = `
-      <h2>Здравствуйте</h2>
-      <p>Я Бэрримор. Я помню ваши нити и разговоры, обращаюсь к внешним
-      исполнителям и ничего не делаю без вашего ведома. Начните с любого вопроса —
-      или посмотрите, что уже готово:</p>
-      <ol>
-        ${checks.map((c) => `
-          <li>
-            ${c.ok ? tag("готово", "ok") : tag("не хватает", "warn")}
-            ${esc(c.ok ? c.good : c.bad)}
-            ${c.ok ? "" : ` <a href="#" onclick="showTab('${c.where}');return false">поправить</a>`}
-          </li>`).join("")}
-      </ol>
-      <div class="row" style="margin-top:12px">
-        <button class="ghost" id="welcome-done">Понятно, больше не показывать</button>
-      </div>`;
-    $("welcome-done").addEventListener("click", () => {
-      localStorage.setItem("barrymore.welcomed", "1");
-      box.hidden = true;
-    });
-  } catch {
-    box.hidden = true;
-  }
-}
-
 window.showTab = (name) => showTab(name);
+
+// ---------- разговор ----------
 
 async function loadTalk() {
   try {
     const d = await api("/api/v1/conversations");
     const p = d.provider || {};
     const ready = p.status === "ready";
-    $("talk-provider").innerHTML = `
-      <div class="row">
-        <strong>Разговорный слой</strong>
-        ${tag(p.status || "неизвестно", PROVIDER_TONE[p.status] || "")}
-        <span class="grow"></span>
-        <span class="muted">${esc(p.model || "")}${
-          p.latency ? ` · отклик ${Math.round(p.latency / 1e6)} мс` : ""
-        }</span>
-      </div>
-      <div class="muted" style="margin-top:6px">${esc(p.reason || "")}</div>
-      ${
-        ready
-          ? ""
-          : `<div class="notes" style="margin-top:10px">Бэрримор сейчас не разговаривает.
-             Нити, штат, поручения и предиктивный контур работают без него.</div>`
-      }`;
     $("talk-send").disabled = !ready;
+    $("talk-status").innerHTML = ready
+      ? techNote(`${esc(p.model || "")}${
+          p.latency ? ` · отклик ${Math.round(p.latency / 1e6)} мс` : ""
+        }`)
+      : `Бэрримор сейчас не разговаривает. Остальное работает без него.
+         ${techNote(`· ${esc(p.status || "")} · ${esc(p.reason || "")}`)}`;
 
     const items = d.items || [];
     if (!currentConversation && items.length) currentConversation = items[0].id;
     if (currentConversation) await loadChat();
-    else $("chat").innerHTML = `<div class="muted">Начните новый разговор.</div>`;
+    else $("chat").innerHTML = greeting();
     await loadThreadState();
-    await loadWelcome(items.length);
-    await loadNotices();
+    await refreshAffairs();
   } catch (err) {
-    $("talk-provider").innerHTML = `<span class="tag bad">ошибка</span> ${esc(err.message)}`;
+    $("talk-status").innerHTML = `<span class="tag bad">ошибка</span> ${esc(err.message)}`;
   }
+}
+
+// greeting — то, с чего начинается пустой экран.
+//
+// Это приветствие, а не мастер настройки: чего не хватает, сказано в сайдбаре,
+// потому что нехватка требует решения, а знакомство — нет.
+function greeting() {
+  return `<div class="bubble barrymore" style="max-width:100%">Здравствуйте. \
+Я Бэрримор. Я помню ваши нити и разговоры, обращаюсь к внешним исполнителям \
+и ничего не делаю без вашего ведома. Напишите, с чем помочь.</div>`;
 }
 
 // ---------- нить разговора ----------
 
-// Нить показывается рядом с разговором, а не на другой вкладке.
+// Нить обозначена строкой над разговором, а не карточкой в потоке.
 //
-// Смысл в том, чтобы владельцу не приходилось помнить, о чём шла речь в
-// прошлый раз, и не приходилось ходить за этим в другое место. Состояние
-// здесь — то, что Бэрримор утверждает о нити, а не пересказ переписки.
+// Строка отвечает ровно на один вопрос — «о чём этот разговор». Полное
+// состояние Бэрримор показывает по нажатию, в сайдбаре, не уводя владельца
+// с Приёмной.
+let threadContext = null;
+
 async function loadThreadState() {
-  const box = $("thread-state");
+  const line = $("thread-line");
   if (!currentConversation) {
-    box.hidden = true;
+    threadContext = null;
+    line.hidden = true;
+    if (detailKind === "thread") closeDetail();
     return;
   }
   try {
     const d = await api(`/api/v1/conversations/${currentConversation}`);
     const t = d.thread?.thread;
     if (!t) {
-      box.hidden = true;
+      threadContext = null;
+      line.hidden = true;
+      if (detailKind === "thread") closeDetail();
       return;
     }
-    const open = (d.thread.questions || []).filter((q) => q.status === "open");
-    const decided = d.thread.decisions || [];
-    // Действующие позиции: устаревшие получают срок действия, а не удаляются.
-    const live = (d.thread.positions || []).filter((x) => !x.valid_until);
-    const orders = (d.orders || []).filter((o) => o.state !== "cancelled");
-    box.hidden = false;
-    box.innerHTML = `
+    threadContext = d;
+    line.hidden = false;
+    line.innerHTML = `Нить: <span class="name">${esc(t.title)}</span> · ${esc(say(t.state))}`;
+    line.title = "показать состояние нити";
+    if (detailKind === "thread") showThreadDetail();
+  } catch {
+    // Нить — не главное в разговоре: без неё разговор всё равно работает.
+    line.hidden = true;
+  }
+}
+
+$("thread-line").addEventListener("click", () => {
+  if (detailKind === "thread") {
+    closeDetail();
+    return;
+  }
+  showThreadDetail();
+});
+
+// ---------- прошлые разговоры ----------
+//
+// Разговор не должен пропадать оттого, что начался следующий. Список живёт
+// в сайдбаре по той же причине, что и всё остальное: смотреть прошлое —
+// не повод уходить с Приёмной, а держать его постоянно на виду незачем.
+$("talk-history").addEventListener("click", () => {
+  if (detailKind === "history") {
+    closeDetail();
+    return;
+  }
+  showHistoryDetail();
+});
+
+async function showHistoryDetail() {
+  detailKind = "history";
+  setAffairs(true);
+  $("affairs-detail").innerHTML =
+    `<div class="affair-body">Смотрю, о чём говорили…</div>`;
+  try {
+    // Нити подгружаются заодно: разговор называют по делу, к которому он
+    // отнесён, а не по своему идентификатору.
+    await loadThreads();
+    const d = await api("/api/v1/conversations");
+    // Пустые разговоры не показываются: начатый и брошенный экран — не память
+    // о разговоре, а след нажатия кнопки. Текущий виден всегда.
+    const items = (d.items || []).filter(
+      (c) => c.id === currentConversation || c.updated_at !== c.created_at);
+    if (detailKind !== "history") return;
+    $("affairs-detail").innerHTML = `
+      <div class="affair-body" style="border-bottom:1px solid var(--line);
+           padding-bottom:12px; margin-bottom:4px">
+        <div class="row">
+          <strong>Прошлые разговоры</strong>
+          <span class="grow"></span>
+          <button class="ghost" onclick="closeDetail()" title="свернуть"
+            style="padding:2px 9px">×</button>
+        </div>
+        ${
+          items.length
+            ? `<ul class="plain">${items.map((c) => `
+                <li class="clickable" onclick="openConversation('${esc(c.id)}')">
+                  <div>${
+                    c.id === currentConversation ? `${tag("этот", "ok")} ` : ""
+                  }${esc(c.title || threadTitles.get(c.thread_id) || "Разговор без нити")}</div>
+                  <div class="muted">${when(c.updated_at)}</div>
+                </li>`).join("")}</ul>`
+            : `<p class="muted">Разговоров пока не было.</p>`
+        }
+      </div>`;
+  } catch (err) {
+    $("affairs-detail").innerHTML =
+      `<div class="affair-body">Список разговоров не читается: ${esc(err.message)}</div>`;
+  }
+}
+
+window.openConversation = async (id) => {
+  if (id === currentConversation) {
+    closeDetail();
+    return;
+  }
+  currentConversation = id;
+  turnAffairs = [];
+  closeDetail();
+  await loadChat();
+  await loadThreadState();
+  await refreshAffairs();
+};
+
+function showThreadDetail() {
+  const d = threadContext;
+  if (!d?.thread?.thread) return;
+  const t = d.thread.thread;
+  const open = (d.thread.questions || []).filter((q) => q.status === "open");
+  const decided = d.thread.decisions || [];
+  // Действующие позиции: устаревшие получают срок действия, а не удаляются.
+  const live = (d.thread.positions || []).filter((x) => !x.valid_until);
+  const orders = (d.orders || []).filter((o) => o.state !== "cancelled");
+
+  detailKind = "thread";
+  setAffairs(true);
+  $("affairs-detail").innerHTML = `
+    <div class="affair-body" style="border-bottom:1px solid var(--line);
+         padding-bottom:12px; margin-bottom:4px">
       <div class="row">
-        <h2 style="margin:0">${esc(t.title)}</h2>
-        ${tag(say(t.state))}
+        <strong>${esc(t.title)}</strong> ${tag(say(t.state))}
         <span class="grow"></span>
-        <button class="ghost" onclick="openThreadFromTalk('${esc(t.id)}')">Подробно</button>
-        <button class="ghost" onclick="detachThread()">Не про эту нить</button>
+        <button class="ghost" onclick="closeDetail()" title="свернуть"
+          style="padding:2px 9px">×</button>
       </div>
       ${canonBlock(t.canon || {}, t.id)}
       ${
@@ -1438,7 +1680,7 @@ async function loadThreadState() {
       }
       ${
         live.length
-          ? `<div class="sides" style="margin-top:10px">
+          ? `<div style="margin-top:10px">
              ${sideColumn("Вы", live.filter((x) => x.owner === "person"))}
              ${sideColumn("Бэрримор", live.filter((x) => x.owner === "barrymore"))}
              </div>`
@@ -1457,11 +1699,12 @@ async function loadThreadState() {
                esc(o.title)}</a> ${esc(say(o.state))}`).join(" · ")}</div>`
           : ""
       }
-      ${techNote(`<div style="margin-top:6px">${esc(t.id)} · рев. ${t.revision}</div>`)}`;
-  } catch {
-    // Нить — не главное в разговоре: без неё разговор всё равно работает.
-    box.hidden = true;
-  }
+      <div class="row">
+        <button class="ghost" onclick="openThreadFromTalk('${esc(t.id)}')">Открыть в «Нитях»</button>
+        <button class="ghost" onclick="detachThread()">Не про эту нить</button>
+      </div>
+      ${techNote(`<div style="margin-top:6px">${esc(t.id)} · рев. ${t.revision}</div>`)}
+    </div>`;
 }
 
 // canonBlock показывает состояние нити так, как о нём спрашивают вслух.
@@ -1507,7 +1750,10 @@ window.detachThread = async () => {
   await api(`/api/v1/conversations/${currentConversation}/thread`, {
     method: "POST", body: JSON.stringify({ thread_id: "", why: "владелец отвязал" }),
   });
+  closeDetail();
+  turnAffairs = turnAffairs.filter((i) => i.id !== "thread-attached");
   await loadThreadState();
+  await refreshAffairs();
 };
 
 window.undoCanon = async (threadID) => {
@@ -1517,34 +1763,33 @@ window.undoCanon = async (threadID) => {
   if (openThreadID === threadID) openThread(threadID);
 };
 
+// ---------- реплики ----------
+
 function bubble(m) {
   const who = m.role === "person" ? "Вы" : "Бэрримор";
+  // Модель, задержка и токены — не часть разговора. В обычном режиме их
+  // не видно вовсе; след извлечения объясняет, почему ответ получился таким.
   const meta = [];
   if (m.model) meta.push(esc(m.model));
   if (m.latency_ms) meta.push(`${Math.round(m.latency_ms / 1000)} с`);
   if (m.output_tokens) meta.push(`${m.prompt_tokens}+${m.output_tokens} токенов`);
-  // След извлечения объясняет, почему ответ получился таким. Владельцу это
-  // нужно редко, поэтому он живёт в техническом режиме, а не под каждой репликой.
   const trace = (m.retrieval_trace || []).length
-    ? techNote(`<div class="meta">подано в контекст: ${m.retrieval_trace.map(esc).join("; ")}</div>`)
+    ? `<div class="meta">подано в контекст: ${m.retrieval_trace.map(esc).join("; ")}</div>`
     : "";
-  return `<div class="bubble ${esc(m.role)}">
-    <div class="meta">${who} · ${when(m.created_at)}${meta.length ? " · " + meta.join(" · ") : ""}</div>
-    ${esc(m.content)}
-    ${trace}
-  </div>`;
+  return `<div class="bubble ${esc(m.role)}"><div class="meta">${who} · ${
+    when(m.created_at)}${meta.length ? techNote(` · ${meta.join(" · ")}`) : ""
+  }</div><div class="said">${esc(m.content)}</div>${
+    trace ? `<span class="tech-only">${trace}</span>` : ""}</div>`;
 }
 
-// restore=false нужен, когда следом всё равно рисуются предложения хода:
-// два подряд обновления одного блока дают заметный мигающий скачок.
+// restore=false нужен, когда следом всё равно пересобирается сайдбар:
+// два подряд обновления подряд дают заметный мигающий скачок.
 async function loadChat(restore = true) {
   if (!currentConversation) return;
   try {
     const d = await api(`/api/v1/conversations/${currentConversation}/messages`);
     const items = d.items || [];
-    $("chat").innerHTML = items.length
-      ? items.map(bubble).join("")
-      : `<div class="muted">Разговор пуст. Напишите первым.</div>`;
+    $("chat").innerHTML = items.length ? items.map(bubble).join("") : greeting();
     $("chat").scrollTop = $("chat").scrollHeight;
   } catch (err) {
     $("chat").innerHTML = `<div class="muted">${esc(err.message)}</div>`;
@@ -1573,7 +1818,7 @@ async function restoreProposals() {
         .map((o, i) => ({ ...o, _index: i }))
         .filter((o) => !done.has(o.goal)) };
 
-    renderProposals({
+    takeTurn({
       proposal,
       reply: { id: d.message_id },
       memory_candidates: [],
@@ -1584,7 +1829,7 @@ async function restoreProposals() {
         : threadOutcomeFrom(d.proposal),
     });
   } catch {
-    $("talk-proposals").hidden = true;
+    turnAffairs = [];
   }
 }
 
@@ -1607,12 +1852,13 @@ $("talk-new").addEventListener("click", async () => {
       body: JSON.stringify({ thread_id: "", title: "" }),
     });
     currentConversation = c.id;
-    $("talk-proposals").hidden = true;
-    await loadChat();
+    turnAffairs = [];
+    await loadChat(false);
     // Карточка нити принадлежит разговору, а не экрану. Без этого на новом
     // разговоре оставалась нить прежнего — и владелец читал бы состояние
     // одного дела, разговаривая о другом.
     await loadThreadState();
+    await refreshAffairs();
   } catch (err) {
     alert(`Разговор не начат: ${err.message}`);
   }
@@ -1634,6 +1880,10 @@ async function send() {
   sending = true;
   $("talk-send").disabled = true;
   $("talk-input").value = "";
+  // Приветствие — не реплика: как только разговор начался, оно уходит.
+  // Реплика владельца есть в любом непустом разговоре, поэтому её отсутствие
+  // и означает «здесь пока только приветствие».
+  if (!$("chat").querySelector(".bubble.person")) $("chat").innerHTML = "";
   $("chat").insertAdjacentHTML("beforeend",
     `<div class="bubble person"><div class="meta">Вы · только что</div>${esc(text)}</div>
      <div class="thinking" id="thinking">Бэрримор думает… на локальной модели это занимает до минуты.</div>`);
@@ -1651,8 +1901,9 @@ async function send() {
     });
     clearInterval(timer);
     await loadChat(false);
-    renderProposals(turn);
+    takeTurn(turn);
     await loadThreadState();
+    await refreshAffairs();
     loadMemory();
   } catch (err) {
     clearInterval(timer);
@@ -1665,153 +1916,157 @@ async function send() {
   }
 }
 
-// renderProposals показывает то, что Бэрримор предложил, и даёт решить.
+// takeTurn превращает сказанное Бэрримором в дела для сайдбара.
 //
-// Каждое предложение здесь доводится до конца одним нажатием: нить заводится
-// вместе с состоянием, поручение оформляется вместе с целью, причиной,
-// каталогом и критериями. Ничего из этого владелец не вводит повторно —
-// сервер берёт предложение из журнала, то есть из того, что Бэрримор
-// действительно сказал.
+// Каждое дело доводится до конца одним нажатием: нить заводится вместе
+// с состоянием, поручение оформляется вместе с целью, причиной, каталогом
+// и критериями. Ничего из этого владелец не вводит повторно — сервер берёт
+// предложение из журнала, то есть из того, что Бэрримор действительно сказал.
 let lastMessageID = "";
 let lastTurn = null;
 
-function renderProposals(turn) {
+function takeTurn(turn) {
   const p = turn.proposal || {};
   const cands = turn.memory_candidates || [];
   const orders = p.work_order_proposals || [];
   const questions = p.open_questions || [];
-  const pos = p.thread_position;
   const th = turn.thread || {};
   lastMessageID = turn.reply?.id || "";
   lastTurn = turn;
 
-  const hasThread = !!th.proposed || th.attached || !!th.refused;
-  if (!cands.length && !orders.length && !questions.length && !pos && !hasThread) {
-    $("talk-proposals").hidden = true;
-    return;
-  }
-  $("talk-proposals").hidden = false;
-  $("talk-proposals").innerHTML = `
-    <h2>Что дальше</h2>
-    ${threadProposalBlock(th)}
-    ${
-      orders.length
-        ? `<div style="margin-top:12px"><strong style="font-size:13px">Предлагаю поручить</strong>
-           <ul class="plain">${orders.map((o, i) =>
-             orderProposal(o, o._index ?? i)).join("")}</ul></div>`
-        : ""
-    }
-    ${
-      cands.length
-        ? `<div style="margin-top:12px"><strong style="font-size:13px">Память</strong>
-           <ul class="plain">${cands.map((c) => `
-             <li><div>${tag(c.type)} ${c.auto ? tag("записано", "ok") : ""} ${esc(c.content)}</div>
-             <div class="muted" style="margin-top:4px">${esc(c.reason || "")}</div>
-             <div class="row" style="margin-top:6px">
-               ${
-                 c.auto
-                   ? `<button class="ghost" onclick="forgetMemory('${esc(c.item_id)}')">Удалить из памяти</button>`
-                   : `<button class="act" onclick="acceptMemory('${esc(c.id)}')">Запомнить</button>
-                      <button class="ghost" onclick="rejectMemory('${esc(c.id)}')">Не надо</button>`
-               }
-             </div></li>`).join("")}</ul></div>`
-        : ""
-    }
-    ${
-      pos
-        ? `<details style="margin-top:12px"><summary class="muted">его позиция по нити</summary>
-           <div>${esc(pos.statement)}</div>
-           <div class="muted">${confidenceWord(pos.confidence)} · ${esc(pos.basis)}</div></details>`
-        : ""
-    }
-    ${
-      // Открытые вопросы, попавшие в нить, уже видны в её карточке выше.
-      // Показать их и здесь значило бы предложить владельцу прочитать
-      // одно и то же дважды.
-      questions.length && !th.thread_id
-        ? `<div style="margin-top:12px"><strong style="font-size:13px">Открытые вопросы</strong>
-           <ul class="plain">${questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ul></div>`
-        : ""
-    }
-    <div id="talk-approval"></div>`;
-}
+  const out = [];
 
-// threadProposalBlock объясняет, что произошло с нитью.
-//
-// Связывание Бэрримор делает сам, и молчать об этом нельзя: незаметное
-// действие, о котором владелец не знает, доверия не добавляет.
-function threadProposalBlock(th) {
   if (th.refused) {
     // Отказ без выхода из положения — тупик. Назвать нить владелец может сам,
     // и делать это на другой вкладке ему незачем.
-    return `
-      <div class="notes" style="margin-top:8px">
-        ${esc(th.refused)}
-        <div class="row" style="margin-top:8px">
-          <input id="thread-manual" class="grow" placeholder="как назвать нить"
-            style="max-width:320px">
-          <button class="ghost" onclick="startThreadFromTalk(true)">Завести нить</button>
+    out.push({
+      id: "thread-refused", group: "needs", need: true,
+      what: "Разговор не удалось отнести к нити", which: "нити",
+      body: `<div>${esc(th.refused)}</div>
+        <div class="row">
+          <input id="thread-manual" class="grow" placeholder="как назвать нить">
         </div>
-      </div>`;
+        <div class="row">
+          <button class="ghost" onclick="startThreadFromTalk(true)">Завести нить</button>
+        </div>`,
+    });
+  } else if (th.proposed) {
+    out.push({
+      id: "thread-new", group: "needs", need: true,
+      what: `Похоже, это новое дело: «${th.proposed.title}»`, which: "новая нить",
+      body: `${th.proposed.why ? `<div class="muted">${esc(th.proposed.why)}</div>` : ""}
+        ${canonBlock({
+          goal: th.proposed.state?.goal, situation: th.proposed.state?.situation,
+          next_step: th.proposed.state?.next_step,
+          obstacles: th.proposed.state?.obstacles, waiting: th.proposed.state?.waiting,
+        })}
+        <div class="row">
+          <button class="act" onclick="startThreadFromTalk()">Завести нить</button>
+        </div>
+        <div class="muted" style="margin-top:6px">заведу с этим названием
+          и состоянием; править можно потом</div>`,
+    });
+  } else if (th.attached) {
+    // Связывание Бэрримор делает сам, и молчать об этом нельзя: незаметное
+    // действие, о котором владелец не знает, доверия не добавляет.
+    out.push({
+      id: "thread-attached", group: "changed",
+      what: "Отнёс разговор к нити", which: th.title || th.thread_id,
+      body: `<div>${th.why ? esc(th.why) : "выбрана по смыслу разговора"}</div>
+        <div class="row">
+          <button class="ghost" onclick="detachThread()">Не про эту нить</button>
+        </div>`,
+    });
   }
-  if (th.attached) {
-    return `<div class="muted" style="margin-top:8px">
-      Отнёс разговор к нити «${esc(th.title || th.thread_id)}»${
-        th.why ? `: ${esc(th.why)}` : ""
-      }. Если это не она — нажмите «Не про эту нить» выше.</div>`;
+
+  orders.forEach((o, i) => {
+    const idx = o._index ?? i;
+    out.push({
+      id: `proposal-${idx}`, group: "needs", need: true,
+      what: `Предлагаю поручить: ${o.title || o.goal}`,
+      which: th.title || (th.proposed ? th.proposed.title : "") || "разговор",
+      body: orderProposalBody(o, idx),
+    });
+  });
+
+  for (const c of cands) {
+    out.push(c.auto
+      ? {
+          id: `mem-${c.item_id}`, group: "changed",
+          what: "Записал в память", which: c.type,
+          body: `<div>${esc(c.content)}</div>
+            <div class="muted" style="margin-top:4px">${esc(c.reason || "")}</div>
+            <div class="row">
+              <button class="ghost" onclick="forgetMemory('${esc(c.item_id)}')">Удалить из памяти</button>
+            </div>`,
+        }
+      : {
+          id: `mem-${c.id}`, group: "needs", need: true,
+          what: "Запомнить это?", which: c.type,
+          body: `<div>${esc(c.content)}</div>
+            <div class="muted" style="margin-top:4px">${esc(c.reason || "")}</div>
+            <div class="row">
+              <button class="act" onclick="acceptMemory('${esc(c.id)}')">Запомнить</button>
+              <button class="ghost" onclick="rejectMemory('${esc(c.id)}')">Не надо</button>
+            </div>`,
+        });
   }
-  if (!th.proposed) return "";
-  const s = th.proposed.state || {};
-  return `
-    <div style="margin-top:8px">
-      <div><strong>Похоже, это новое дело: «${esc(th.proposed.title)}»</strong></div>
-      ${th.proposed.why ? `<div class="muted">${esc(th.proposed.why)}</div>` : ""}
-      ${canonBlock({ goal: s.goal, situation: s.situation, next_step: s.next_step,
-                     obstacles: s.obstacles, waiting: s.waiting })}
-      <div class="row" style="margin-top:8px">
-        <button class="act" onclick="startThreadFromTalk()">Завести нить</button>
-        <span class="muted">заведу с этим названием и состоянием; править можно потом</span>
-      </div>
-    </div>`;
+
+  // Открытые вопросы, попавшие в нить, уже видны в её состоянии. Показать их
+  // ещё и здесь значило бы предложить владельцу прочитать одно и то же дважды.
+  // Предложенная нить считается так же: вопросы уедут в неё при заведении.
+  if (questions.length && !th.thread_id && !th.attached && !th.proposed) {
+    out.push({
+      id: "questions", group: "changed",
+      what: "Остались открытые вопросы", which: "разговор",
+      body: `<ul class="plain">${questions.map((q) => `<li>${esc(q)}</li>`).join("")}</ul>`,
+    });
+  }
+
+  turnAffairs = out;
+  // Предложение — ответ на только что сказанное владельцем, поэтому сайдбар
+  // открывается сам. Требование «закрыт по умолчанию» относится к приходу
+  // на экран, а не к ответу на собственное действие.
+  if (out.some((i) => i.need)) {
+    setAffairs(true);
+    for (const i of out) if (i.need) openAffairs.add(i.id);
+  }
 }
 
-// orderProposal показывает поручение целиком — до того, как оно создано.
+// orderProposalBody показывает поручение целиком — до того, как оно создано.
 //
 // Владелец видит ровно то, что уйдёт исполнителю, и решает по существу:
 // каталог и право менять файлы названы прямо, а не спрятаны в форму.
-function orderProposal(o, i) {
+function orderProposalBody(o, i) {
   const write = o.needs_write;
   return `
-    <li>
-      <div><strong>${esc(o.title || o.goal)}</strong></div>
-      <div style="margin-top:2px">${esc(o.goal)}</div>
-      <div class="muted" style="margin-top:2px">почему: ${esc(o.why)}</div>
-      <dl class="kv" style="margin-top:8px">
-        <dt>каталог</dt><dd>${
-          o.workspace_hint
-            ? esc(o.workspace_hint)
-            : `<input id="wo-root-${i}" placeholder="/home/…/git/rollboard" style="max-width:340px">`
-        }</dd>
-        ${
-          (o.acceptance_criteria || []).length
-            ? `<dt>что считается сделанным</dt><dd>${
-                o.acceptance_criteria.map(esc).join("; ")}</dd>`
-            : ""
-        }
-        <dt>доступ</dt><dd>${
-          write
-            ? `${tag("нужна правка файлов", "warn")} исполнитель работает в копии; ваш каталог
-               не тронут, изменения дойдут только по вашему решению`
-            : "только чтение"
-        }</dd>
-      </dl>
-      <div class="row" style="margin-top:8px">
-        <button class="act" onclick="orderFromTalk(${i})">Поручить</button>
-        <label class="switch"><input type="checkbox" id="wo-write-${i}" ${
-          write ? "checked" : ""
-        }> разрешить менять код</label>
-      </div>
-    </li>`;
+    <div>${esc(o.goal)}</div>
+    <div class="muted" style="margin-top:4px">почему: ${esc(o.why)}</div>
+    <dl class="kv" style="margin-top:8px">
+      <dt>каталог</dt><dd>${
+        o.workspace_hint
+          ? esc(o.workspace_hint)
+          : `<input id="wo-root-${i}" placeholder="/home/…/git/rollboard">`
+      }</dd>
+      ${
+        (o.acceptance_criteria || []).length
+          ? `<dt>что считается сделанным</dt><dd>${
+              o.acceptance_criteria.map(esc).join("; ")}</dd>`
+          : ""
+      }
+      <dt>доступ</dt><dd>${
+        write
+          ? `${tag("нужна правка файлов", "warn")} исполнитель работает в копии; ваш каталог
+             не тронут, изменения дойдут только по вашему решению`
+          : "только чтение"
+      }</dd>
+    </dl>
+    <div class="row">
+      <button class="act" onclick="orderFromTalk(${i})">Поручить</button>
+      <label class="switch"><input type="checkbox" id="wo-write-${i}" ${
+        write ? "checked" : ""
+      }> разрешить менять код</label>
+    </div>`;
 }
 
 // startThreadFromTalk заводит нить по предложению. Название, вид и состояние
@@ -1830,24 +2085,26 @@ window.startThreadFromTalk = async (manual) => {
     const th = await api(`/api/v1/conversations/${currentConversation}/threads`, {
       method: "POST", body: JSON.stringify(body),
     });
-    // Предложение стало нитью: перерисовываем тот же ход, чтобы кнопка
+    // Предложение стало нитью: пересобираем тот же ход, чтобы кнопка
     // «Завести нить» не осталась висеть рядом с уже заведённой.
     if (lastTurn) {
       lastTurn.thread = {
         thread_id: th.id, title: th.title, attached: true,
         why: "нить заведена по вашему решению",
       };
-      renderProposals(lastTurn);
+      takeTurn(lastTurn);
     }
     await loadThreadState();
     await loadThreads();
+    await refreshAffairs();
   } catch (err) {
-    alert(`Нить не заведена: ${err.message}`);
+    affairNotes.set(manual ? "thread-refused" : "thread-new", `Нить не заведена: ${err.message}`);
+    renderAffairs();
   }
 };
 
 // orderFromTalk оформляет поручение и сразу показывает, что именно
-// подтверждается: исполнитель, модель, стоимость и каталог.
+// подтверждается: исполнитель, каталог и право менять файлы.
 window.orderFromTalk = async (index) => {
   const rootField = document.getElementById(`wo-root-${index}`);
   const writeField = document.getElementById(`wo-write-${index}`);
@@ -1859,35 +2116,18 @@ window.orderFromTalk = async (index) => {
     const p = await api(`/api/v1/conversations/${currentConversation}/work-orders`, {
       method: "POST", body: JSON.stringify(body),
     });
-    renderApproval(p);
+    // Предложение стало поручением и больше не предложение; подтверждение
+    // раскрывается сразу — оно и есть следующий шаг владельца.
+    turnAffairs = turnAffairs.filter((i) => i.id !== `proposal-${index}`);
+    affairNotes.delete(`proposal-${index}`);
+    if (p.approval?.id) openAffairs.add(`approval-${p.approval.id}`);
     await loadOrders();
+    await refreshAffairs();
   } catch (err) {
-    $("talk-approval").innerHTML =
-      `<div class="notes" style="margin-top:10px">Поручение не создано: ${esc(err.message)}</div>`;
+    affairNotes.set(`proposal-${index}`, `Поручение не создано: ${err.message}`);
+    renderAffairs();
   }
 };
-
-// renderApproval показывает подтверждение там же, где владелец сейчас смотрит.
-//
-// Уходить за ним на другую вкладку — ровно то хождение, от которого этот
-// экран и должен избавлять.
-function renderApproval(p) {
-  const o = p.order || {};
-  const a = p.approval || {};
-  $("talk-approval").innerHTML = `
-    <div class="card" style="margin-top:12px">
-      <div class="row"><strong>Запустить исполнителя?</strong>
-        ${o.audit_only ? tag("только чтение", "ok") : tag("с правкой файлов", "warn")}</div>
-      <div style="margin-top:6px">${esc(a.summary || "")}</div>
-      ${a.scope?.notes ? `<div class="muted" style="margin-top:4px">${esc(a.scope.notes)}</div>` : ""}
-      ${o.worker_rationale ? `<div class="muted" style="margin-top:4px">${esc(o.worker_rationale)}</div>` : ""}
-      <div class="row" style="margin-top:10px">
-        <button class="act" onclick="approveAndStart('${esc(a.id)}','${esc(o.id)}')">
-          Подтвердить и запустить</button>
-        <button class="ghost" onclick="denyFromTalk('${esc(a.id)}')">Не сейчас</button>
-      </div>
-    </div>`;
-}
 
 window.approveAndStart = async (approvalID, orderID) => {
   try {
@@ -1895,14 +2135,15 @@ window.approveAndStart = async (approvalID, orderID) => {
       method: "POST", body: JSON.stringify({ decided_by: "владелец" }),
     });
     await api(`/api/v1/work-orders/${orderID}/start`, { method: "POST", body: "{}" });
-    $("talk-approval").innerHTML =
-      `<div class="muted" style="margin-top:10px">Запустил. Скажу, когда будет результат —
-       и сам обновлю состояние нити.</div>`;
+    // Подтверждение исчезает из ожидающих, а поручение появляется среди
+    // идущих — раскрытым, чтобы владелец увидел, куда делась кнопка.
+    openAffairs.add(`run-${orderID}`);
     await loadOrders();
     await loadThreadState();
+    await refreshAffairs();
   } catch (err) {
-    $("talk-approval").innerHTML =
-      `<div class="notes" style="margin-top:10px">Не запущено: ${esc(err.message)}</div>`;
+    affairNotes.set(`approval-${approvalID}`, `Не запущено: ${err.message}`);
+    renderAffairs();
   }
 };
 
@@ -1910,9 +2151,8 @@ window.denyFromTalk = async (approvalID) => {
   await api(`/api/v1/approvals/${approvalID}/deny`, {
     method: "POST", body: JSON.stringify({ decided_by: "владелец", reason: "не сейчас" }),
   });
-  $("talk-approval").innerHTML =
-    `<div class="muted" style="margin-top:10px">Хорошо, поручение остаётся неподтверждённым.</div>`;
   await loadOrders();
+  await refreshAffairs();
 };
 
 $("talk-send").addEventListener("click", send);
@@ -1925,13 +2165,15 @@ $("talk-input").addEventListener("keydown", (e) => {
 window.acceptMemory = async (id) => {
   await api(`/api/v1/memory/candidates/${id}/accept`, { method: "POST", body: "{}" });
   loadMemory();
-  $("talk-proposals").hidden = true;
+  turnAffairs = turnAffairs.filter((i) => i.id !== `mem-${id}`);
+  refreshAffairs();
 };
 
 window.rejectMemory = async (id) => {
   await api(`/api/v1/memory/candidates/${id}/reject`, { method: "POST", body: "{}" });
   loadMemory();
-  $("talk-proposals").hidden = true;
+  turnAffairs = turnAffairs.filter((i) => i.id !== `mem-${id}`);
+  refreshAffairs();
 };
 
 window.forgetMemory = async (id) => {
@@ -2074,15 +2316,17 @@ let lastSeq = 0;
 function connectStream() {
   const src = new EventSource(`/api/v1/stream?from=${lastSeq}`);
 
+  // Исправная связь — служебная подробность и в обычном режиме не видна.
+  // Потерянная видна всегда: молча отставший экран хуже честной надписи.
   src.onopen = () => {
     $("live").textContent = "поток: подключён";
-    $("live").className = "tag ok";
+    $("live").className = "tag ok tech-only";
   };
 
   src.onmessage = (msg) => handleEvent(msg);
   // Именованные события приходят с типом события домена.
   src.addEventListener("error", () => {
-    $("live").textContent = "поток: переподключение";
+    $("live").textContent = "связь потеряна, восстанавливаю";
     $("live").className = "tag warn";
   });
 
@@ -2122,6 +2366,9 @@ function handleEvent(msg) {
   if (env.event_type.startsWith("work_order") || env.event_type.startsWith("worker_run") ||
       env.event_type.startsWith("verification")) {
     loadOrders();
+    // Поручение дошло до конца — обращение об этом должно появиться в делах
+    // сразу, а не через десять секунд опроса.
+    refreshAffairs();
   }
   // Нить Бэрримор обновляет сам — в том числе пока владелец смотрит на неё.
   // Карточка, отставшая от журнала, показывала бы вчерашнее положение дел.
@@ -2319,7 +2566,7 @@ setInterval(() => {
   if (sending) return;
   const current = document.querySelector('nav button[aria-current="true"]');
   if (current && current.dataset.tab !== "talk") refresh(current.dataset.tab);
-  // Значок обновляется на любой вкладке: обращение Бэрримора не должно
+  // Дела пересобираются на любой вкладке: обращение Бэрримора не должно
   // ждать, пока владелец сам заглянет в Приёмную.
-  loadNotices();
+  refreshAffairs();
 }, 10000);

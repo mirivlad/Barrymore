@@ -92,13 +92,16 @@
   .clickable { cursor: pointer; }
   .clickable:hover { color: var(--accent); }
   .chat {
-    display: flex; flex-direction: column; gap: 10px; margin-top: 12px;
-    max-height: 52vh; overflow-y: auto; padding-right: 4px;
+    display: flex; flex-direction: column; gap: 10px;
+    overflow-y: auto; padding-right: 4px;
   }
   .bubble {
     padding: 10px 13px; border-radius: 12px; border: 1px solid var(--line);
-    white-space: pre-wrap; line-height: 1.5; max-width: 88%;
+    line-height: 1.5; max-width: 88%;
   }
+  /* Перенос строк владельца сохраняется, но только внутри самой реплики:
+     на всём пузыре pre-wrap превращал отступы разметки в пустые строки. */
+  .bubble .said { white-space: pre-wrap; }
   .bubble.person { align-self: flex-end; background: var(--bg); }
   .bubble.barrymore { align-self: flex-start; background: var(--panel); }
   .bubble .meta { font-size: 11.5px; color: var(--muted); margin-top: 6px; }
@@ -143,6 +146,87 @@
   .welcome ol { margin: 8px 0 0; padding-left: 20px; }
   .welcome li { margin-bottom: 4px; }
 
+  /* Приёмная. Главный элемент экрана — разговор, и это выражено размером:
+     он занимает высоту окна целиком, а всё остальное живёт сбоку.
+     Прежняя вёрстка складывала карточки в вертикальную стопку, из-за чего
+     собеседник оказывался где-то посередине операторского дашборда. */
+  .reception {
+    display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px;
+    align-items: start;
+  }
+  body.affairs-open .reception { grid-template-columns: minmax(0, 1fr) 340px; }
+  @media (max-width: 900px) {
+    body.affairs-open .reception { grid-template-columns: minmax(0, 1fr); }
+  }
+
+  .talk { display: flex; flex-direction: column; gap: 10px; height: calc(100vh - 116px); }
+  .talk > .chat { flex: 1 1 auto; min-height: 0; }
+  .talk-top { display: flex; align-items: center; gap: 10px; min-height: 30px; }
+  .talk-top button { white-space: nowrap; }
+  /* Распорка не должна отбирать место у строки нити: имя дела важнее пустоты. */
+  .talk-top .grow { flex: 1 1 10px; }
+
+  /* Нить обозначена строкой, а не карточкой: она задаёт, о чём разговор,
+     и не должна соперничать с самим разговором. Полное состояние — по нажатию. */
+  .thread-line {
+    background: none; border: none; font: inherit; color: var(--muted);
+    padding: 0; cursor: pointer; text-align: left; min-width: 0; flex: 0 1 auto;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px;
+  }
+  .thread-line .name { color: var(--ink); }
+  .thread-line:hover .name { color: var(--accent); }
+
+  .composer {
+    display: flex; gap: 10px; align-items: flex-end;
+    border: 1px solid var(--line); background: var(--panel);
+    border-radius: 12px; padding: 10px;
+  }
+  .composer:focus-within { border-color: var(--accent); }
+  .composer textarea {
+    border: none; background: transparent; padding: 0; min-height: 46px; resize: none;
+  }
+  .composer textarea:focus { outline: none; }
+
+  /* Кнопка со счётчиком — единственное, что видно от сайдбара в закрытом виде. */
+  .affairs-toggle {
+    background: none; border: 1px solid var(--line); color: var(--muted);
+    border-radius: 999px; padding: 4px 12px; font: inherit; font-size: 13px;
+    cursor: pointer; display: inline-flex; align-items: center; gap: 7px;
+    white-space: nowrap;
+  }
+  .affairs-toggle:hover { color: var(--ink); border-color: var(--accent); }
+  .affairs-toggle .count {
+    background: var(--line); color: var(--ink); border-radius: 999px;
+    padding: 0 7px; font-size: 12px; min-width: 20px; text-align: center;
+  }
+  .affairs-toggle.hot .count { background: var(--bad); color: var(--bg); }
+  .affairs-toggle.warm .count { background: var(--warn); color: var(--bg); }
+
+  .affairs {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 12px 14px; max-height: calc(100vh - 116px); overflow-y: auto;
+    position: sticky; top: 76px;
+  }
+  .affairs h3 {
+    font-size: 12.5px; color: var(--accent); font-weight: 600; margin: 16px 0 2px;
+    display: flex; align-items: baseline; gap: 7px;
+  }
+  .affairs h3:first-child { margin-top: 0; }
+  .affairs h3 .count { color: var(--muted); font-weight: 400; }
+  .affairs .empty { color: var(--muted); font-size: 12.5px; margin: 4px 0 0; }
+  .affair { border-top: 1px solid var(--line); }
+  .affair:first-child { border-top: none; }
+  .affair-head {
+    width: 100%; text-align: left; background: none; border: none; color: inherit;
+    font: inherit; padding: 9px 0; cursor: pointer; display: block;
+  }
+  .affair-head:hover .affair-what { color: var(--accent); }
+  .affair-what { display: block; font-size: 13.5px; }
+  .affair-which { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .affair-body { font-size: 13px; padding-bottom: 10px; }
+  .affair-body .row { margin-top: 8px; }
+  .affair-body button.act, .affair-body button.ghost { padding: 5px 10px; font-size: 13px; }
+
   details > summary { cursor: pointer; }
   details[open] > summary { margin-bottom: 6px; }
 
@@ -153,7 +237,7 @@
     main { padding: 14px; }
     nav { order: 3; width: 100%; }
     nav button { padding: 5px 9px; font-size: 14px; }
-    .chat { max-height: 60vh; }
+    .talk { height: calc(100vh - 150px); }
     .bubble { max-width: 96%; }
     .card { padding: 12px 13px; }
   }
@@ -173,36 +257,49 @@
     <button data-tab="journal" class="tech-only">Журнал</button>
   </nav>
   <span class="grow"></span>
-  <label class="switch" title="показывать идентификаторы, виды событий и внутренние состояния">
-    <input type="checkbox" id="tech-mode"> технический режим
-  </label>
   <button class="ghost" id="notice-badge" hidden></button>
-  <span id="live" class="tag">связь: устанавливается…</span>
+  <span id="live" class="tag tech-only">связь: устанавливается…</span>
+  <!-- Значок связи виден всегда, только когда связь потеряна: исправное
+       состояние — служебная подробность, а вот молчащий поток владельцу
+       знать полезно, иначе экран тихо отстаёт от происходящего. -->
 </header>
 
 <main>
+  <!-- Приёмная. В центре — разговор и поле ввода, и больше ничего.
+       Всё, что случилось в доме, пока владелец разговаривал, лежит справа
+       и открывается по кнопке. -->
   <section id="tab-talk">
-    <div class="card welcome" id="welcome" hidden></div>
-    <div class="card" id="notices" hidden></div>
-    <div class="card" id="talk-provider"></div>
-    <div class="card" id="thread-state" hidden></div>
-    <div class="card">
-      <div class="row">
-        <h2 style="margin:0">Разговор</h2>
-        <span class="grow"></span>
-        <button class="ghost" id="talk-new">Новый разговор</button>
-      </div>
-      <div id="chat" class="chat"></div>
-      <div class="row" style="margin-top:12px; align-items:flex-end">
-        <div class="grow">
-          <textarea id="talk-input" rows="2"
-            placeholder="Напишите Бэрримору… (Ctrl+Enter — отправить)"></textarea>
+    <div class="reception">
+      <div class="talk">
+        <div class="talk-top">
+          <button class="thread-line" id="thread-line" hidden
+                  aria-controls="affairs"></button>
+          <span class="grow"></span>
+          <button class="ghost" id="talk-history" style="padding:4px 11px;font-size:13px"
+                  aria-controls="affairs">Прошлые разговоры</button>
+          <button class="ghost" id="talk-new" style="padding:4px 11px;font-size:13px">
+            Новый разговор</button>
+          <button class="affairs-toggle" id="affairs-toggle"
+                  aria-expanded="false" aria-controls="affairs">
+            Дела <span class="count" id="affairs-count">0</span>
+          </button>
         </div>
-        <button class="act" id="talk-send">Отправить</button>
+        <div id="chat" class="chat"></div>
+        <div class="composer">
+          <div class="grow">
+            <textarea id="talk-input" rows="2"
+              placeholder="Напишите Бэрримору… (Ctrl+Enter — отправить)"></textarea>
+          </div>
+          <button class="act" id="talk-send">Отправить</button>
+        </div>
+        <div class="muted" id="talk-status"></div>
       </div>
-      <div class="muted" id="talk-status" style="margin-top:6px"></div>
+
+      <aside class="affairs" id="affairs" hidden aria-label="Дела">
+        <div id="affairs-detail"></div>
+        <div id="affairs-groups"></div>
+      </aside>
     </div>
-    <div class="card" id="talk-proposals" hidden></div>
   </section>
 
   <section id="tab-memory" hidden>
@@ -382,6 +479,15 @@
       <p class="muted">Отключённый исполнитель остаётся в штате и виден, но
         поручения ему не достаются. Решение записывается в журнал.</p>
       <ul class="plain" id="settings-workers"><li class="muted">загрузка…</li></ul>
+    </div>
+    <div class="card">
+      <h2>Технический режим</h2>
+      <p class="muted">Показывает идентификаторы, виды событий, модель, задержки,
+        токены и внутренние состояния runtime. В обычном разговоре всё это
+        только мешает, поэтому переключатель живёт здесь, а не в шапке.</p>
+      <label class="switch" style="margin-top:8px">
+        <input type="checkbox" id="tech-mode"> показывать техническую подоплёку
+      </label>
     </div>
     <div class="card">
       <h2>Что задано при запуске</h2>
