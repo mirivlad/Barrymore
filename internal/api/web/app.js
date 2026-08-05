@@ -1224,7 +1224,7 @@ async function loadNotices() {
     box.hidden = false;
     box.innerHTML = `
       <div class="row">
-        <h2 style="margin:0">Бэрримор хочет сказать</h2>
+        <h2 style="margin:0">Что изменилось и что ждёт вашего решения</h2>
         <span class="grow"></span>
         ${techNote(esc(d.policy?.enabled ? "инициатива включена" : "инициатива выключена"))}
       </div>
@@ -1408,6 +1408,9 @@ async function loadThreadState() {
       return;
     }
     const open = (d.thread.questions || []).filter((q) => q.status === "open");
+    const decided = d.thread.decisions || [];
+    // Действующие позиции: устаревшие получают срок действия, а не удаляются.
+    const live = (d.thread.positions || []).filter((x) => !x.valid_until);
     const orders = (d.orders || []).filter((o) => o.state !== "cancelled");
     box.hidden = false;
     box.innerHTML = `
@@ -1419,6 +1422,23 @@ async function loadThreadState() {
         <button class="ghost" onclick="detachThread()">Не про эту нить</button>
       </div>
       ${canonBlock(t.canon || {}, t.id)}
+      ${
+        decided.length
+          ? `<div style="margin-top:10px"><strong style="font-size:13px">О чём договорились</strong>
+             <ul class="plain">${decided.slice(0, 3).map((x) => `
+               <li>${esc(x.statement)}
+               <span class="muted">— ${x.decided_by === "person" ? "решили вы" : "решил Бэрримор"}</span>
+               </li>`).join("")}</ul></div>`
+          : ""
+      }
+      ${
+        live.length
+          ? `<div class="sides" style="margin-top:10px">
+             ${sideColumn("Вы", live.filter((x) => x.owner === "person"))}
+             ${sideColumn("Бэрримор", live.filter((x) => x.owner === "barrymore"))}
+             </div>`
+          : ""
+      }
       ${
         open.length
           ? `<div style="margin-top:10px"><strong style="font-size:13px">Открытые вопросы</strong>
