@@ -161,11 +161,17 @@ func (s *Server) systemState(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "запуски недоступны", err.Error())
 		return
 	}
+	changes, err := s.app.Delegation.PendingChanges(ctx)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "изменения недоступны", err.Error())
+		return
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"journal_head":       head,
 		"open_discrepancies": open,
 		"pending_approvals":  pending,
+		"pending_changes":    changes,
 		"active_runs":        active,
 		"isolation":          caps,
 		"workspace_roots":    s.app.Policy.Roots(),

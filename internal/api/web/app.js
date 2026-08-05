@@ -293,6 +293,27 @@ async function loadState() {
   }
 
   try {
+    const s2 = await api("/api/v1/system/state");
+    const waiting = s2.pending_changes || [];
+    $("pending-changes-card").hidden = !waiting.length;
+    $("pending-changes").innerHTML = waiting.map((o) => {
+      const ch = o.change_summary || {};
+      return `
+        <li class="clickable" onclick="showTab('orders');openOrder('${esc(o.id)}')">
+          <div class="row">
+            <strong>${esc(o.title)}</strong>
+            <span class="grow"></span>
+            <span class="muted">${(ch.files || []).length} файлов ·
+              +${ch.insertions || 0}/−${ch.deletions || 0}</span>
+          </div>
+          <div class="muted">${esc(o.workspace_root)}</div>
+        </li>`;
+    }).join("");
+  } catch {
+    // Не главное на экране состояния: без этого списка остальное всё равно полезно.
+  }
+
+  try {
     const a = await api("/api/v1/approvals/pending");
     const items = a.items || [];
     $("approvals").innerHTML = items.length

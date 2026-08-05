@@ -805,3 +805,28 @@ func parseTSPtr(s sql.NullString) (*time.Time, error) {
 	}
 	return &t, nil
 }
+
+// PendingChanges перечисляет поручения, изменения которых ждут решения.
+//
+// Работа, ждущая владельца, обязана быть видна не только внутри карточки
+// поручения: иначе он уйдёт из раздела и забудет, что от него чего-то ждут.
+func (s *Service) PendingChanges(ctx context.Context) ([]WorkOrder, error) {
+	rows, err := s.db.Reader().QueryContext(ctx,
+		selectOrderColumns+` WHERE change_state = ? ORDER BY updated_at DESC`, ChangeCollected)
+	if err != nil {
+		return nil, fmt.Errorf("чтение изменений, ждущих решения: %w", err)
+	}
+	defer rows.Close()
+
+	out := []WorkOrder{}
+	for rows.Next() {
+		o, err := scanOrder(rows)
+		if err != nil {
+			return nil, err
+		}
+		// Дифф здесь не нужен: это перечень, а не разбор.
+		o.ChangeSummary.Patch = ""
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
