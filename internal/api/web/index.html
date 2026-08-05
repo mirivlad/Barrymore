@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Бэрримор — интерфейс оператора</title>
+<title>Бэрримор</title>
 <style>
   :root {
     --bg: #12100e; --panel: #1b1815; --line: #2e2926; --ink: #e8e2d8;
@@ -89,12 +89,47 @@
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   td, th { text-align: left; padding: 5px 8px 5px 0; vertical-align: top; }
   th { color: var(--muted); font-weight: 500; }
+
+  /* Техническая глубина доступна по раскрытию, но не засоряет обычный разговор
+     (07_USER_EXPERIENCE §1). Она не удаляется из разметки, а скрывается:
+     переключатель должен показывать её мгновенно, без перезагрузки данных. */
+  body:not(.tech) .tech-only { display: none; }
+  .switch {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--muted); font-size: 12.5px; cursor: pointer; user-select: none;
+  }
+  .switch input { width: auto; margin: 0; accent-color: var(--accent); }
+
+  /* Группы нитей названы по-человечески; заголовок группы объясняет,
+     что она значит, чтобы состояние не приходилось угадывать. */
+  .group { margin-bottom: 18px; }
+  .group > h3 {
+    font-size: 14px; margin: 0 0 2px; font-weight: 600;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .group > h3 .count { color: var(--muted); font-weight: 400; font-size: 12.5px; }
+  .group > .why { color: var(--muted); font-size: 12.5px; margin: 0 0 8px; }
+  .thread-row { display: block; padding: 10px 12px; }
+  .thread-row:hover { border-color: var(--accent); }
+  .quiet { opacity: .72; }
+
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; font-size: 13px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; }
+
+  .sides { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 700px) { .sides { grid-template-columns: 1fr; } }
+  .side { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .side h4 { margin: 0 0 6px; font-size: 12.5px; color: var(--accent); font-weight: 600; }
+
+  .welcome { border-left: 3px solid var(--accent); padding-left: 14px; }
+  .welcome ol { margin: 8px 0 0; padding-left: 20px; }
+  .welcome li { margin-bottom: 4px; }
 </style>
 </head>
 <body>
 <header>
   <h1>Бэрримор</h1>
-  <span class="muted">интерфейс оператора</span>
   <nav>
     <button data-tab="talk" aria-current="true">Приёмная</button>
     <button data-tab="threads">Нити</button>
@@ -102,14 +137,19 @@
     <button data-tab="orders">Поручения</button>
     <button data-tab="memory">Память</button>
     <button data-tab="state">Состояние</button>
-    <button data-tab="journal">Журнал</button>
+    <button data-tab="settings">Настройки</button>
+    <button data-tab="journal" class="tech-only">Журнал</button>
   </nav>
   <span class="grow"></span>
-  <span id="live" class="tag">поток: подключение…</span>
+  <label class="switch" title="показывать идентификаторы, виды событий и внутренние состояния">
+    <input type="checkbox" id="tech-mode"> технический режим
+  </label>
+  <span id="live" class="tag">связь: устанавливается…</span>
 </header>
 
 <main>
   <section id="tab-talk">
+    <div class="card welcome" id="welcome" hidden></div>
     <div class="card" id="talk-provider"></div>
     <div class="card">
       <div class="row">
@@ -178,7 +218,20 @@
   </section>
 
   <section id="tab-threads" hidden>
+    <div class="card" id="thread-detail" hidden></div>
     <div class="card">
+      <div class="row">
+        <h2 style="margin:0">Нити</h2>
+        <span class="grow"></span>
+        <button class="ghost" id="th-toggle-new">Завести нить</button>
+      </div>
+      <p class="muted" style="margin:8px 0 0">
+        Нить может не иметь срока и измеримого результата: идея, спор или сомнение —
+        полноценные нити.
+      </p>
+    </div>
+    <div id="threads-groups"><p class="muted">загрузка…</p></div>
+    <div class="card" id="th-new" hidden>
       <h2>Новая нить</h2>
       <div class="row">
         <div class="grow"><label for="th-title">Название</label>
@@ -198,11 +251,6 @@
         <button class="act" id="th-create">Создать нить</button>
       </div>
     </div>
-    <div class="card">
-      <h2>Нити</h2>
-      <ul class="plain" id="threads"><li class="muted">загрузка…</li></ul>
-    </div>
-    <div class="card" id="thread-detail" hidden></div>
   </section>
 
   <section id="tab-staff" hidden>
@@ -242,6 +290,45 @@
       <ul class="plain" id="orders"><li class="muted">загрузка…</li></ul>
     </div>
     <div class="card" id="order-detail" hidden></div>
+  </section>
+
+  <section id="tab-settings" hidden>
+    <div class="card">
+      <h2>Локальная модель</h2>
+      <p class="muted" id="models-note">загрузка…</p>
+      <ul class="plain" id="models-list"></ul>
+    </div>
+    <div class="card">
+      <h2>Как модель считает</h2>
+      <p class="muted">Эти параметры влияют на скорость. Изменение поднимает
+        модель заново — на большой модели это займёт минуты.</p>
+      <div class="row">
+        <div style="flex:1 1 130px"><label for="tune-context">Контекст</label>
+          <input id="tune-context" type="number" min="512" step="1024"></div>
+        <div style="flex:1 1 110px"><label for="tune-threads">Потоки CPU</label>
+          <input id="tune-threads" type="number" min="0"></div>
+        <div style="flex:1 1 110px"><label for="tune-gpu">Слоёв на GPU</label>
+          <input id="tune-gpu" type="number" min="0"></div>
+        <div style="flex:1 1 130px"><label for="tune-moe">Экспертов на CPU</label>
+          <input id="tune-moe" type="number" min="0"></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="act" id="tune-apply">Применить</button>
+        <span class="muted">ноль означает «как решит llama-server»</span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Кого привлекать</h2>
+      <p class="muted">Отключённый исполнитель остаётся в штате и виден, но
+        поручения ему не достаются. Решение записывается в журнал.</p>
+      <ul class="plain" id="settings-workers"><li class="muted">загрузка…</li></ul>
+    </div>
+    <div class="card">
+      <h2>Что задано при запуске</h2>
+      <p class="muted">Это меняется только перезапуском: настройки хранятся
+        в файле, который Бэрримор читает при старте.</p>
+      <div id="settings-launch" class="muted">загрузка…</div>
+    </div>
   </section>
 
   <section id="tab-journal" hidden>

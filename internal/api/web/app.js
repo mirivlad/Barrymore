@@ -45,6 +45,67 @@ function ago(ts) {
   return `${Math.round(seconds / 3600)} ч назад`;
 }
 
+// ---------- технический режим ----------
+//
+// 07_USER_EXPERIENCE §1: интерфейс не должен выглядеть как панель оркестратора.
+// Глубина доступна по раскрытию — но именно скрыта, а не вычищена: владелец
+// в любой момент видит те же данные, что и раньше, без перезагрузки.
+const techBox = $("tech-mode");
+let techMode = localStorage.getItem("barrymore.tech") === "1";
+
+function applyTech() {
+  document.body.classList.toggle("tech", techMode);
+  techBox.checked = techMode;
+}
+techBox.addEventListener("change", () => {
+  techMode = techBox.checked;
+  localStorage.setItem("barrymore.tech", techMode ? "1" : "0");
+  applyTech();
+  refresh(activeTab());
+  // Открытая карточка перерисовывается тоже: иначе половина экрана осталась бы
+  // в прежнем режиме, и владелец решил бы, что переключатель работает через раз.
+  if (openThreadID) openThread(openThreadID);
+});
+applyTech();
+
+// SAY переводит внутренние состояния на человеческий язык.
+//
+// Служебное имя остаётся доступным в техническом режиме: подменять его
+// насовсем значило бы отнять у владельца возможность соотнести увиденное
+// с журналом.
+const SAY = {
+  // нити
+  active: "живёт", maturing: "зреет", waiting: "ждёт", blocked: "застряла",
+  paused: "не договорили", resolved: "завершена", released: "отпущена",
+  archived: "в архиве",
+  // исполнители
+  available: "доступен", likely_available: "скорее всего доступен",
+  unknown: "неизвестно", quota_exhausted: "квота исчерпана",
+  auth_required: "нужен вход", payment_confirmation_required: "просит подтвердить оплату",
+  offline: "не отвечает", broken: "сломан",
+  // поручения
+  draft: "черновик", proposed: "предложено", approved: "разрешено",
+  preparing: "готовится", running: "выполняется", awaiting_user: "ждёт вас",
+  verifying: "проверяется", completed: "выполнено", failed: "не вышло",
+  cancelled: "отменено",
+  // проверки, ожидания, расхождения
+  passed: "пройдена", skipped: "пропущена", pending: "в силе",
+  satisfied: "сбылось", expired: "срок вышел", superseded: "заменено",
+  open: "открыто", escalated: "передано вам",
+  reacting: "восстанавливается", acknowledged: "принято к сведению",
+  info: "к сведению", warning: "важно", critical: "тревога",
+};
+
+// У расхождения `resolved` значит «закрыто», а не «завершена», как у нити.
+// Одно слово на два смысла звучало бы небрежно, поэтому словарь местный.
+const SAY_DISCREPANCY = { ...SAY, resolved: "закрыто" };
+
+function say(value, dict = SAY) {
+  if (!value) return "—";
+  if (techMode) return value;
+  return dict[value] || value;
+}
+
 // Статусы окрашиваются осторожно: «неизвестно» не выглядит как «хорошо».
 const TONE = {
   available: "ok", likely_available: "warn", unknown: "",
@@ -58,23 +119,49 @@ const TONE = {
   info: "", warning: "warn", critical: "bad",
 };
 
-function tag(text, tone) {
+function tag(text, tone, dict) {
   const cls = tone ?? TONE[text] ?? "";
-  return `<span class="tag ${cls}">${esc(text)}</span>`;
+  return `<span class="tag ${cls}">${esc(say(text, dict))}</span>`;
+}
+
+// techNote показывает служебную подробность только в техническом режиме.
+function techNote(html) {
+  return html ? `<span class="tech-only muted">${html}</span>` : "";
 }
 
 // ---------- вкладки ----------
 
 const tabs = document.querySelectorAll("nav button");
-tabs.forEach((btn) => {
-  btn.addEventListener("click", () => {
-    tabs.forEach((b) => b.setAttribute("aria-current", String(b === btn)));
-    document.querySelectorAll("main section").forEach((s) => {
-      s.hidden = s.id !== `tab-${btn.dataset.tab}`;
-    });
-    refresh(btn.dataset.tab);
+
+function activeTab() {
+  const current = document.querySelector('nav button[aria-current="true"]');
+  return current ? current.dataset.tab : "talk";
+}
+
+function showTab(name, remember = true) {
+  const btn = [...tabs].find((b) => b.dataset.tab === name);
+  if (!btn) return;
+  tabs.forEach((b) => b.setAttribute("aria-current", String(b === btn)));
+  document.querySelectorAll("main section").forEach((s) => {
+    s.hidden = s.id !== `tab-${name}`;
   });
-});
+  if (remember) localStorage.setItem("barrymore.tab", name);
+  refresh(name);
+}
+
+tabs.forEach((btn) => btn.addEventListener("click", () => showTab(btn.dataset.tab)));
+
+// Восстановление места живёт в конце файла: к тому времени определено всё,
+// что оно трогает.
+function restorePlace() {
+  const savedTab = localStorage.getItem("barrymore.tab");
+  if (savedTab && savedTab !== "talk") showTab(savedTab, false);
+
+  // Открытая карточка нити тоже восстанавливается: возвращаться к списку и
+  // заново искать нить после каждой перезагрузки — мелкая, но ежедневная обида.
+  const savedThread = localStorage.getItem("barrymore.thread");
+  if (savedThread && savedTab === "threads") openThread(savedThread);
+}
 
 // ---------- состояние ----------
 
@@ -238,92 +325,265 @@ window.deny = async (id) => {
 
 // ---------- нити ----------
 
+// Группы нитей из 07_USER_EXPERIENCE §2. Порядок важен: сверху то, что живёт
+// сейчас, снизу — отпущенное. Пояснение к группе избавляет от угадывания.
+const THREAD_GROUPS = [
+  { state: "active", title: "Сейчас живёт", why: "этим вы заняты; здесь ждут вашего внимания" },
+  { state: "maturing", title: "Зреет", why: "замысел ещё не оформился, но и не заброшен" },
+  { state: "waiting", title: "Ждёт", why: "нужно чужое действие или наступление срока" },
+  { state: "blocked", title: "Застряло", why: "движение невозможно, пока препятствие не снято" },
+  { state: "paused", title: "Мы не договорили", why: "разговор оборван на середине" },
+  { state: "resolved", title: "Завершено", why: "вопрос закрыт", quiet: true },
+  { state: "released", title: "Отпущено", why: "решено больше не заниматься; это не провал", quiet: true },
+  { state: "archived", title: "В архиве", why: "убрано с глаз, но не удалено", quiet: true },
+];
+
+const KIND_LABEL = {
+  project: "проект", idea: "идея", problem: "проблема", decision: "решение",
+  conversation: "разговор", research: "исследование", waiting: "ожидание",
+  personal: "личное", relationship: "отношения", other: "прочее",
+};
+
+// threadTitles позволяет показать связь названием другой нити, а не её
+// идентификатором: связь между «Аудит mirvmon» и «thr_06fw…» читается по-разному.
+const threadTitles = new Map();
+
+function threadRow(t) {
+  return `
+    <div class="card thread-row clickable" onclick="openThread('${esc(t.id)}')">
+      <div class="row">
+        <strong>${esc(t.title)}</strong>
+        <span class="grow"></span>
+        <span class="muted">${esc(KIND_LABEL[t.kind] || t.kind)}</span>
+        ${techNote(`· ${esc(t.id)} · рев. ${t.revision}`)}
+      </div>
+      ${t.summary ? `<div class="muted" style="margin-top:3px">${esc(t.summary)}</div>`
+        : t.origin ? `<div class="muted" style="margin-top:3px">${esc(t.origin)}</div>` : ""}
+      <div class="muted" style="margin-top:3px">
+        последнее движение ${ago(t.last_meaningful_activity_at || t.updated_at)}
+      </div>
+    </div>`;
+}
+
 async function loadThreads() {
   try {
     const d = await api("/api/v1/threads");
     const items = d.items || [];
-    $("threads").innerHTML = items.length
-      ? items.map((t) => `
-          <li class="clickable" onclick="openThread('${esc(t.id)}')">
-            <div class="row">
-              ${tag(t.state)} <strong>${esc(t.title)}</strong>
-              <span class="grow"></span>
-              <span class="muted">${esc(t.kind)} · рев. ${t.revision}</span>
-            </div>
-            ${t.origin ? `<div class="muted" style="margin-top:3px">${esc(t.origin)}</div>` : ""}
-          </li>`).join("")
-      : `<li class="muted">нитей пока нет</li>`;
+    items.forEach((t) => threadTitles.set(t.id, t.title));
+
+    if (!items.length) {
+      $("threads-groups").innerHTML =
+        `<p class="muted">Нитей пока нет. Первая появится сама, как только вы
+         о чём-нибудь заговорите с Бэрримором, — или заведите её вручную.</p>`;
+    } else {
+      // Пустые группы не показываются: перечислять то, чего нет, — шум.
+      // Незнакомое состояние не теряется, а выносится отдельной группой,
+      // иначе нить исчезла бы из виду без всякого следа.
+      const known = new Set(THREAD_GROUPS.map((g) => g.state));
+      const stray = items.filter((t) => !known.has(t.state));
+      const groups = THREAD_GROUPS.map((g) => ({ ...g, items: items.filter((t) => t.state === g.state) }))
+        .filter((g) => g.items.length);
+      if (stray.length) {
+        groups.push({ title: "Состояние не распознано", items: stray,
+          why: "интерфейс не знает такого состояния; подробности — в техническом режиме" });
+      }
+      $("threads-groups").innerHTML = groups.map((g) => `
+        <div class="group ${g.quiet ? "quiet" : ""}">
+          <h3>${esc(g.title)} <span class="count">${g.items.length}</span></h3>
+          <p class="why">${esc(g.why)}</p>
+          ${g.items.map(threadRow).join("")}
+        </div>`).join("");
+    }
 
     const select = $("wo-thread");
-    select.innerHTML = items
-      .map((t) => `<option value="${esc(t.id)}">${esc(t.title)}</option>`)
-      .join("");
+    if (select) {
+      select.innerHTML = items
+        .map((t) => `<option value="${esc(t.id)}">${esc(t.title)}</option>`)
+        .join("");
+    }
   } catch (err) {
-    $("threads").innerHTML = `<li class="muted">${esc(err.message)}</li>`;
+    $("threads-groups").innerHTML = `<p class="muted">${esc(err.message)}</p>`;
   }
 }
+
+$("th-toggle-new").addEventListener("click", () => {
+  const box = $("th-new");
+  box.hidden = !box.hidden;
+  if (!box.hidden) $("th-title").focus();
+});
+
+// Позиции сторон намеренно разведены по колонкам: в домене они хранятся
+// раздельно, и слияние их в один список стирало бы главное — что стороны
+// могут не соглашаться.
+function sideColumn(title, list) {
+  if (!list.length) {
+    return `<div class="side"><h4>${esc(title)}</h4>
+      <p class="muted" style="margin:0">ничего не сформулировано</p></div>`;
+  }
+  return `<div class="side"><h4>${esc(title)}</h4>
+    ${list.map((p) => `
+      <div style="margin-bottom:8px">
+        <div>${esc(p.statement)}</div>
+        <div class="muted">${confidenceWord(p.confidence)}${
+          p.basis ? ` · ${esc(p.basis)}` : ""
+        }</div>
+      </div>`).join("")}</div>`;
+}
+
+// Число уверенности само по себе ничего не говорит владельцу; в техническом
+// режиме оно остаётся видимым как есть.
+function confidenceWord(v) {
+  if (techMode) return `уверенность ${v}`;
+  if (v >= 0.9) return "уверенно";
+  if (v >= 0.6) return "скорее так";
+  return "предположение";
+}
+
+const LINK_LABEL = {
+  depends_on: "зависит от", conflicts_with: "противоречит",
+  derived_from: "выросла из", related_to: "связана с",
+  supersedes: "заменяет", blocks: "мешает", inspired_by: "навеяна",
+};
+
+const EVENT_LABEL = {
+  "thread.created": "нить заведена",
+  "thread.updated": "нить изменена",
+  "thread.state.changed": "состояние изменилось",
+  "thread.position.updated": "записана позиция",
+  "thread.decision.recorded": "принято решение",
+  "thread.question.opened": "задан вопрос",
+  "thread.question.resolved": "вопрос закрыт",
+  "thread.linked": "связана с другой нитью",
+  "thread.released": "нить отпущена",
+};
+
+let openThreadID = null;
 
 window.openThread = async (id) => {
   const box = $("thread-detail");
   box.hidden = false;
+  openThreadID = id;
+  localStorage.setItem("barrymore.thread", id);
   box.innerHTML = `<span class="muted">загрузка…</span>`;
   try {
     const { thread: d, work_orders: orders } = await api(`/api/v1/threads/${id}`);
-    const positions = (d.positions || []).filter((p) => !p.valid_until);
-    box.innerHTML = `
-      <h2>${esc(d.thread.title)}</h2>
-      <div class="row">${tag(d.thread.state)} <span class="muted">${esc(d.thread.kind)}</span></div>
-      ${d.thread.origin ? `<p class="muted">${esc(d.thread.origin)}</p>` : ""}
+    const t = d.thread;
+    const live = (d.positions || []).filter((p) => !p.valid_until);
+    const open = (d.questions || []).filter((q) => q.status === "open");
+    const answered = (d.questions || []).filter((q) => q.status !== "open");
+    const group = THREAD_GROUPS.find((g) => g.state === t.state);
 
-      <h2 style="margin-top:16px">Позиции сторон</h2>
-      ${
-        positions.length
-          ? `<ul class="plain">${positions.map((p) => `
-              <li><strong>${p.owner === "person" ? "Владелец" : "Бэрримор"}</strong>
-              <span class="muted">уверенность ${p.confidence}</span>
-              <div>${esc(p.statement)}</div>
-              ${p.basis ? `<div class="muted">основание: ${esc(p.basis)}</div>` : ""}</li>`).join("")}</ul>`
-          : `<p class="muted">позиции не зафиксированы</p>`
-      }
+    let timeline = [];
+    try {
+      timeline = (await api(`/api/v1/threads/${id}/timeline`)).items || [];
+    } catch {
+      // История — не главное в карточке: без неё карточка всё равно полезна.
+    }
+
+    box.innerHTML = `
+      <div class="row">
+        <h2 style="margin:0">${esc(t.title)}</h2>
+        <span class="grow"></span>
+        <button class="ghost" onclick="closeThread()">Закрыть</button>
+      </div>
+      <div class="row" style="margin-top:6px">
+        ${tag(t.state)}
+        <span class="muted">${esc(KIND_LABEL[t.kind] || t.kind)}</span>
+        ${group ? `<span class="muted">· ${esc(group.why)}</span>` : ""}
+        ${techNote(`· ${esc(t.id)} · рев. ${t.revision}`)}
+      </div>
+      ${t.summary ? `<p style="margin:10px 0 0">${esc(t.summary)}</p>` : ""}
+      ${t.origin ? `<p class="muted" style="margin:6px 0 0">почему появилась: ${esc(t.origin)}</p>` : ""}
+      ${t.released_reason ? `<p class="muted" style="margin:6px 0 0">отпущена: ${esc(t.released_reason)}</p>` : ""}
+      <div class="muted" style="margin-top:6px">
+        заведена ${when(t.created_at)} · последнее движение ${ago(t.last_meaningful_activity_at || t.updated_at)}
+      </div>
+
+      <h2 style="margin-top:18px">Позиции сторон</h2>
+      <div class="sides">
+        ${sideColumn("Вы", live.filter((p) => p.owner === "person"))}
+        ${sideColumn("Бэрримор", live.filter((p) => p.owner === "barrymore"))}
+      </div>
       <div class="row" style="margin-top:8px">
         <input id="pos-text" class="grow" placeholder="сформулировать позицию">
         <select id="pos-owner" style="flex:0 0 150px">
-          <option value="person">владелец</option>
-          <option value="barrymore">Бэрримор</option>
+          <option value="person">от вас</option>
+          <option value="barrymore">от Бэрримора</option>
         </select>
         <button class="ghost" onclick="addPosition('${esc(id)}')">Записать</button>
       </div>
 
-      <h2 style="margin-top:16px">Решения</h2>
+      <h2 style="margin-top:18px">Решения</h2>
       ${
         (d.decisions || []).length
           ? `<ul class="plain">${d.decisions.map((x) => `
               <li><div>${esc(x.statement)}</div>
-              <div class="muted">${esc(x.decided_by)}${
+              <div class="muted">${x.decided_by === "person" ? "решили вы" : "решил Бэрримор"}${
                 x.rationale ? ` · ${esc(x.rationale)}` : ""
-              }</div></li>`).join("")}</ul>`
-          : `<p class="muted">решений нет</p>`
+              }${x.decided_at ? ` · ${when(x.decided_at)}` : ""}</div></li>`).join("")}</ul>`
+          : `<p class="muted">решений пока нет</p>`
       }
 
-      <h2 style="margin-top:16px">Открытые вопросы</h2>
+      <h2 style="margin-top:18px">Вопросы</h2>
       ${
-        (d.questions || []).filter((q) => q.status === "open").length
-          ? `<ul class="plain">${d.questions.filter((q) => q.status === "open")
-              .map((q) => `<li>${esc(q.question)}</li>`).join("")}</ul>`
-          : `<p class="muted">вопросов нет</p>`
+        open.length
+          ? `<ul class="plain">${open.map((q) => `<li>${esc(q.question)}</li>`).join("")}</ul>`
+          : `<p class="muted">открытых вопросов нет</p>`
+      }
+      ${
+        answered.length
+          ? `<details style="margin-top:6px"><summary class="muted">закрытые вопросы (${answered.length})</summary>
+              <ul class="plain">${answered.map((q) => `
+                <li class="muted">${esc(q.question)} — ${esc(say(q.status))}</li>`).join("")}</ul></details>`
+          : ""
       }
 
-      <h2 style="margin-top:16px">Поручения нити</h2>
+      <h2 style="margin-top:18px">Поручения</h2>
       ${
         (orders || []).length
           ? `<ul class="plain">${orders.map((o) => `
               <li class="clickable" onclick="openOrder('${esc(o.id)}')">
                 ${tag(o.state)} ${esc(o.title)}</li>`).join("")}</ul>`
-          : `<p class="muted">поручений нет</p>`
+          : `<p class="muted">по этой нити никому ничего не поручалось</p>`
+      }
+
+      ${
+        (d.links || []).length
+          ? `<h2 style="margin-top:18px">Связи</h2>
+             <ul class="plain">${d.links.map((l) => {
+               const other = l.from_id === t.id ? l.to_id : l.from_id;
+               return `
+               <li class="clickable" onclick="openThread('${esc(other)}')">
+                 <span class="muted">${esc(LINK_LABEL[l.kind] || l.kind)}</span>
+                 ${esc(threadTitles.get(other) || other)}
+                 ${l.note ? `<div class="muted">${esc(l.note)}</div>` : ""}
+               </li>`;
+             }).join("")}</ul>`
+          : ""
+      }
+
+      ${
+        timeline.length
+          ? `<details style="margin-top:18px">
+              <summary class="muted">как эта нить менялась (${timeline.length})</summary>
+              <ul class="plain">${timeline.map((e) => `
+                <li class="muted">
+                  ${when(e.occurred_at)} — ${esc(EVENT_LABEL[e.event_type] || e.event_type)}
+                  ${techNote(`· ${esc(e.event_type)} · seq ${e.seq}`)}
+                </li>`).join("")}</ul>
+             </details>`
+          : ""
       }`;
+    box.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
     box.innerHTML = `<span class="tag bad">ошибка</span> ${esc(err.message)}`;
   }
+};
+
+window.closeThread = () => {
+  openThreadID = null;
+  localStorage.removeItem("barrymore.thread");
+  $("thread-detail").hidden = true;
 };
 
 window.addPosition = async (threadID) => {
@@ -706,6 +966,67 @@ let sending = false;
 // показывать ожидание, а не притворяться, что ничего не происходит.
 const PROVIDER_TONE = { ready: "ok", unreachable: "bad", not_configured: "warn", broken: "bad" };
 
+// loadWelcome показывает первое знакомство, пока разговоров ещё не было.
+//
+// Это не мастер настройки: он ничего не настраивает за владельца, а честно
+// перечисляет, что уже готово и чего не хватает, со ссылкой на то место,
+// где это правится. Прятать пробелы за бодрым «всё отлично» — то же враньё.
+async function loadWelcome(conversationCount) {
+  const box = $("welcome");
+  if (conversationCount > 0 || localStorage.getItem("barrymore.welcomed") === "1") {
+    box.hidden = true;
+    return;
+  }
+  try {
+    const s = await api("/api/v1/system/state");
+    const checks = [
+      {
+        ok: s.conversation?.status === "ready",
+        good: "Бэрримор может разговаривать.",
+        bad: "Разговорный слой не отвечает — модель ещё не поднята или не выбрана.",
+        where: "settings",
+      },
+      {
+        ok: (s.workspace_roots || []).length > 0,
+        good: `Разрешённые каталоги заданы: ${(s.workspace_roots || []).join(", ")}.`,
+        bad: "Не задан ни один рабочий каталог — поручения будут отклоняться политикой.",
+        where: "settings",
+      },
+      {
+        ok: !!s.isolation?.bwrap,
+        good: "Изоляция запусков доступна: поручения только на чтение действительно только читают.",
+        bad: "bubblewrap недоступен — поручения запускаться не будут.",
+        where: "state",
+      },
+    ];
+    box.hidden = false;
+    box.innerHTML = `
+      <h2>Здравствуйте</h2>
+      <p>Я Бэрримор. Я помню ваши нити и разговоры, обращаюсь к внешним
+      исполнителям и ничего не делаю без вашего ведома. Начните с любого вопроса —
+      или посмотрите, что уже готово:</p>
+      <ol>
+        ${checks.map((c) => `
+          <li>
+            ${c.ok ? tag("готово", "ok") : tag("не хватает", "warn")}
+            ${esc(c.ok ? c.good : c.bad)}
+            ${c.ok ? "" : ` <a href="#" onclick="showTab('${c.where}');return false">поправить</a>`}
+          </li>`).join("")}
+      </ol>
+      <div class="row" style="margin-top:12px">
+        <button class="ghost" id="welcome-done">Понятно, больше не показывать</button>
+      </div>`;
+    $("welcome-done").addEventListener("click", () => {
+      localStorage.setItem("barrymore.welcomed", "1");
+      box.hidden = true;
+    });
+  } catch {
+    box.hidden = true;
+  }
+}
+
+window.showTab = (name) => showTab(name);
+
 async function loadTalk() {
   try {
     const d = await api("/api/v1/conversations");
@@ -733,6 +1054,7 @@ async function loadTalk() {
     if (!currentConversation && items.length) currentConversation = items[0].id;
     if (currentConversation) await loadChat();
     else $("chat").innerHTML = `<div class="muted">Начните новый разговор.</div>`;
+    await loadWelcome(items.length);
   } catch (err) {
     $("talk-provider").innerHTML = `<span class="tag bad">ошибка</span> ${esc(err.message)}`;
   }
@@ -1076,6 +1398,139 @@ function handleEvent(msg) {
 
 // ---------- запуск ----------
 
+// ---------- настройки ----------
+
+function gigabytes(bytes) {
+  if (!bytes) return "";
+  return `${(bytes / 1024 ** 3).toFixed(1)} ГБ`;
+}
+
+async function loadSettings() {
+  try {
+    const d = await api("/api/v1/local-model/available");
+    const items = d.items || [];
+    $("models-note").textContent = d.dir
+      ? `Каталог моделей: ${d.dir}. ${d.note}`
+      : "Каталог моделей не задан, выбирать не из чего. " +
+        "Укажите его при запуске флагом -local-models-dir.";
+    $("models-list").innerHTML = items.length
+      ? items.map((m) => `
+          <li>
+            <div class="row">
+              ${m.current ? tag("выбрана", "ok") : ""}
+              <strong>${esc(m.name)}</strong>
+              <span class="muted">${gigabytes(m.size_bytes)}</span>
+              <span class="grow"></span>
+              ${m.current ? "" :
+                `<button class="ghost" onclick="selectModel('${esc(m.path)}')">Выбрать</button>`}
+            </div>
+            ${techNote(esc(m.path))}
+          </li>`).join("")
+      : d.dir
+        ? `<li class="muted">в каталоге нет файлов .gguf</li>`
+        : "";
+  } catch (err) {
+    $("models-note").textContent = err.message;
+  }
+
+  try {
+    const s = await api("/api/v1/settings");
+    const lm = s.local_model || {};
+    $("tune-context").value = lm.context_size ?? "";
+    $("tune-threads").value = lm.threads ?? 0;
+    $("tune-gpu").value = lm.gpu_layers ?? 0;
+    $("tune-moe").value = lm.cpu_moe ?? 0;
+
+    $("settings-launch").innerHTML = `
+      <table>
+        <tr><th>Адрес интерфейса</th><td>${esc(s.addr)}</td></tr>
+        <tr><th>Каталог данных</th><td>${esc(s.data_root)}</td></tr>
+        <tr><th>Файл настроек</th><td>${esc(s.path)}</td></tr>
+        <tr><th>Разрешённые каталоги</th><td>${
+          (s.workspace_roots || []).length
+            ? s.workspace_roots.map(esc).join("<br>")
+            : `<span class="tag bad">не заданы</span> поручения будут отклоняться`
+        }</td></tr>
+        <tr><th>Политика стоимости</th><td>${esc(s.model_policy)}</td></tr>
+        <tr><th>Память</th><td>${esc(s.memory_policy)}</td></tr>
+        <tr><th>Порт локальной модели</th><td>${esc(lm.port)}</td></tr>
+      </table>
+      <p style="margin-top:10px">Меняется только перезапуском: ${
+        (s.restart_required || []).map(esc).join(", ")
+      }.</p>`;
+  } catch (err) {
+    $("settings-launch").textContent = err.message;
+  }
+
+  try {
+    const d = await api("/api/v1/workers");
+    const items = d.items || [];
+    $("settings-workers").innerHTML = items.length
+      ? items.map((v) => `
+          <li>
+            <div class="row">
+              <strong>${esc(v.worker.display_name)}</strong>
+              ${tag(CLASS_LABEL[v.worker.class] || v.worker.class,
+                    v.worker.class === "specialist" ? "warn" : "ok")}
+              ${v.worker.enabled ? "" : tag("отключён вами", "bad")}
+              <span class="grow"></span>
+              <button class="ghost" onclick="toggleWorker('${esc(v.worker.id)}', ${!v.worker.enabled})">
+                ${v.worker.enabled ? "Не привлекать" : "Привлекать"}
+              </button>
+            </div>
+            <div class="muted">${esc(v.availability?.reason || "")}</div>
+          </li>`).join("")
+      : `<li class="muted">штат пуст: нажмите «Обнаружить исполнителей» в разделе «Штат»</li>`;
+  } catch (err) {
+    $("settings-workers").innerHTML = `<li class="muted">${esc(err.message)}</li>`;
+  }
+}
+
+window.selectModel = async (path) => {
+  if (!confirm("Выбрать эту модель? Текущая будет остановлена, новая поднимется за минуты.")) return;
+  try {
+    await api("/api/v1/local-model/select", {
+      method: "POST", body: JSON.stringify({ path }),
+    });
+  } catch (err) {
+    alert(`Модель не выбрана: ${err.message}`);
+  }
+  loadSettings();
+};
+
+window.toggleWorker = async (id, enabled) => {
+  try {
+    await api(`/api/v1/workers/${id}/enabled`, {
+      method: "POST", body: JSON.stringify({ enabled, reason: "решение владельца" }),
+    });
+  } catch (err) {
+    alert(`Не вышло: ${err.message}`);
+  }
+  loadSettings();
+};
+
+$("tune-apply").addEventListener("click", async () => {
+  const num = (id) => {
+    const v = parseInt($(id).value, 10);
+    return Number.isFinite(v) ? v : 0;
+  };
+  try {
+    // Путь не передаётся: сервер оставляет выбранную модель как есть.
+    await api("/api/v1/local-model/select", {
+      method: "POST",
+      body: JSON.stringify({
+        context_size: num("tune-context"),
+        threads: num("tune-threads"),
+        gpu_layers: num("tune-gpu"),
+        cpu_moe: num("tune-moe"),
+      }),
+    });
+  } catch (err) {
+    alert(`Не применено: ${err.message}`);
+  }
+  loadSettings();
+});
+
 function refresh(tab) {
   if (tab === "talk") loadTalk();
   if (tab === "state") loadState();
@@ -1083,9 +1538,11 @@ function refresh(tab) {
   if (tab === "staff") loadWorkers();
   if (tab === "orders") { loadOrders(); loadThreads(); }
   if (tab === "memory") loadMemory();
+  if (tab === "settings") loadSettings();
 }
 
 loadTalk();
+restorePlace();
 connectStream();
 setInterval(() => {
   // Пока идёт ответ модели, перерисовывать разговор нельзя: это стёрло бы

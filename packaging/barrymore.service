@@ -1,0 +1,32 @@
+# Бэрримор как пользовательская служба.
+#
+# Устанавливается в ~/.config/systemd/user/barrymore.service и запускается
+# от имени владельца — никакого root: Бэрримор работает с личными данными
+# и не нуждается в правах на всю систему.
+#
+#   systemctl --user enable --now barrymore
+#   systemctl --user status barrymore
+#
+# Настройки живут в файле, а не здесь: менять их через unit значило бы
+# требовать перезапуска службы ради каждой мелочи.
+
+[Unit]
+Description=Бэрримор — личная система непрерывности
+Documentation=https://github.com/mirivlad/barrymore
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/barrymored
+Restart=on-failure
+RestartSec=5
+
+# Процессы исполнителей и сервер модели живут в собственных scope и должны
+# пережить перезапуск Бэрримора. Убивать их вместе со службой нельзя.
+KillMode=process
+
+# Ключ внешнего провайдера, если он нужен. Файла может не быть.
+EnvironmentFile=-%h/.config/barrymore/env
+
+[Install]
+WantedBy=default.target

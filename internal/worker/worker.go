@@ -299,6 +299,7 @@ const (
 	EvModelsObserved      = "worker.models.observed"
 	EvModelCostObserved   = "worker.model.cost.observed"
 	EvTrustChanged        = "worker.trust.changed"
+	EvEnabledChanged      = "worker.enabled.changed"
 )
 
 // StreamType — тип потока событий исполнителя.

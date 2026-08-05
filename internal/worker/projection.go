@@ -73,6 +73,34 @@ func projectUpsert(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
 	return applyUpsert(ctx, tx, p)
 }
 
+// enabledPayload — решение владельца о том, привлекать ли исполнителя.
+type enabledPayload struct {
+	WorkerID  string    `json:"worker_id"`
+	Enabled   bool      `json:"enabled"`
+	Reason    string    `json:"reason,omitempty"`
+	ChangedAt time.Time `json:"changed_at"`
+}
+
+func applyEnabled(ctx context.Context, tx *sql.Tx, p enabledPayload) error {
+	v := 0
+	if p.Enabled {
+		v = 1
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE workers SET enabled = ? WHERE id = ?`, v, p.WorkerID)
+	if err != nil {
+		return fmt.Errorf("проекция участия исполнителя %s: %w", p.WorkerID, err)
+	}
+	return nil
+}
+
+func projectEnabled(ctx context.Context, tx *sql.Tx, env event.Envelope) error {
+	var p enabledPayload
+	if err := env.Decode(&p); err != nil {
+		return err
+	}
+	return applyEnabled(ctx, tx, p)
+}
+
 func applyTrust(ctx context.Context, tx *sql.Tx, p trustPayload) error {
 	_, err := tx.ExecContext(ctx,
 		`UPDATE workers SET trust_level = ? WHERE id = ?`, p.To, p.WorkerID)

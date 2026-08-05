@@ -254,18 +254,33 @@ func New(cfg Config) *Supervisor {
 		Configured: spec.Configured(),
 		Endpoint:   spec.Endpoint(),
 		ModelPath:  spec.ModelPath,
-		Reason:     s.initialReason(),
+		Reason:     reasonFor(spec, s.resolve),
 		ObservedAt: s.now(),
 	}
 	return s
 }
 
+// conf читает настройки под замком.
+//
+// Модель можно сменить на ходу, поэтому обращаться к полям напрямую нельзя:
+// это была бы гонка ровно в том месте, где владелец меняет решение.
+func (s *Supervisor) conf() (Spec, string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.spec, s.binary, s.resolve
+}
+
 func (s *Supervisor) initialReason() string {
+	spec, _, resolveErr := s.conf()
+	return reasonFor(spec, resolveErr)
+}
+
+func reasonFor(spec Spec, resolveErr error) string {
 	switch {
-	case !s.spec.Configured():
+	case !spec.Configured():
 		return "надзор за локальной моделью выключен: файл модели не задан"
-	case s.resolve != nil:
-		return "локальную модель поднять нечем: " + s.resolve.Error()
+	case resolveErr != nil:
+		return "локальную модель поднять нечем: " + resolveErr.Error()
 	default:
 		return "состояние ещё не проверялось"
 	}
@@ -279,19 +294,72 @@ func (s *Supervisor) now() time.Time {
 }
 
 // Enabled сообщает, может ли Бэрримор поднимать сервер модели сам.
-func (s *Supervisor) Enabled() bool { return s.spec.Configured() && s.resolve == nil }
+func (s *Supervisor) Enabled() bool {
+	spec, _, resolveErr := s.conf()
+	return spec.Configured() && resolveErr == nil
+}
+
+// Spec возвращает текущие настройки сервера.
+func (s *Supervisor) Spec() Spec {
+	spec, _, _ := s.conf()
+	return spec
+}
+
+// Reconfigure меняет модель на ходу.
+//
+// Порт не меняется: адрес провайдера выбран при запуске, и смена порта на ходу
+// оставила бы разговорный слой смотреть не туда. Смена самого файла модели
+// безопасна — endpoint тот же, меняется только то, что за ним отвечает.
+//
+// Прежний сервер останавливается до запуска нового: два llama-server на одном
+// порту дали бы непредсказуемое поведение вместо честной ошибки.
+func (s *Supervisor) Reconfigure(ctx context.Context, next Spec) error {
+	next = next.withDefaults()
+	current := s.Spec()
+	if next.Port != current.Port {
+		return fmt.Errorf(
+			"порт сервера модели нельзя сменить без перезапуска Бэрримора: "+
+				"разговорный слой настроен на %s", current.Endpoint())
+	}
+
+	binary, resolveErr := "", error(nil)
+	if next.Configured() {
+		binary, resolveErr = next.Resolve()
+		if resolveErr != nil {
+			// Отказ до остановки работающей модели: менять рабочее на
+			// заведомо неработающее — худший из возможных исходов.
+			return resolveErr
+		}
+	}
+
+	if _, known := s.loadIdentity(); known {
+		if err := s.Stop(ctx, false); err != nil {
+			return fmt.Errorf("прежний сервер модели не остановлен: %w", err)
+		}
+	}
+
+	s.mu.Lock()
+	s.spec, s.binary, s.resolve = next, binary, resolveErr
+	s.last = State{
+		Configured: next.Configured(), Endpoint: next.Endpoint(),
+		ModelPath: next.ModelPath, Reason: "модель выбрана заново, сервер ещё не поднят",
+		ObservedAt: s.now(),
+	}
+	s.mu.Unlock()
+	return nil
+}
 
 // Configured сообщает, ждёт ли Бэрримор локальную модель вообще.
 //
 // Отличается от Enabled: модель может быть нужна, а поднять её нечем — и тогда
 // наблюдать за ней всё равно надо, чтобы сказать владельцу правду.
-func (s *Supervisor) Configured() bool { return s.spec.Configured() }
+func (s *Supervisor) Configured() bool { return s.Spec().Configured() }
 
 // ObserveInterval — как часто следует записывать наблюдение о состоянии.
-func (s *Supervisor) ObserveInterval() time.Duration { return s.spec.ObserveEvery }
+func (s *Supervisor) ObserveInterval() time.Duration { return s.Spec().ObserveEvery }
 
 // Endpoint возвращает адрес сервера.
-func (s *Supervisor) Endpoint() string { return s.spec.Endpoint() }
+func (s *Supervisor) Endpoint() string { return s.Spec().Endpoint() }
 
 // State возвращает последнее известное состояние без обращения к сети.
 func (s *Supervisor) State() State {
@@ -302,11 +370,12 @@ func (s *Supervisor) State() State {
 
 // StartupNote возвращает ограничение запуска, если оно есть.
 func (s *Supervisor) StartupNote() string {
+	spec, _, resolveErr := s.conf()
 	switch {
-	case !s.spec.Configured():
+	case !spec.Configured():
 		return ""
-	case s.resolve != nil:
-		return "локальная модель не будет подниматься Бэрримором: " + s.resolve.Error() +
+	case resolveErr != nil:
+		return "локальная модель не будет подниматься Бэрримором: " + resolveErr.Error() +
 			"; сервер придётся запускать вручную"
 	default:
 		return ""
@@ -387,15 +456,16 @@ func (s *Supervisor) Observe(ctx context.Context) (State, error) {
 // живой процесс — только основание надеяться. Считать модель готовой по живому
 // процессу нельзя: она может ещё грузиться или уже сломаться.
 func (s *Supervisor) look(ctx context.Context) State {
+	spec, _, resolveErr := s.conf()
 	st := State{
-		Configured: s.spec.Configured(),
-		Endpoint:   s.spec.Endpoint(),
-		ModelPath:  s.spec.ModelPath,
+		Configured: spec.Configured(),
+		Endpoint:   spec.Endpoint(),
+		ModelPath:  spec.ModelPath,
 		LogPath:    s.LogPath(),
 		ObservedAt: s.now(),
 	}
 	if !st.Configured {
-		st.Reason = s.initialReason()
+		st.Reason = reasonFor(spec, resolveErr)
 		return st
 	}
 
@@ -480,7 +550,8 @@ func (s *Supervisor) awaitReady(ctx context.Context, st State) (State, error) {
 	if st.Serving {
 		return st, nil
 	}
-	deadline := s.now().Add(s.spec.LoadTimeout)
+	loadTimeout := s.Spec().LoadTimeout
+	deadline := s.now().Add(loadTimeout)
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -503,7 +574,7 @@ func (s *Supervisor) awaitReady(ctx context.Context, st State) (State, error) {
 		if !s.now().Before(deadline) {
 			return st, fmt.Errorf(
 				"модель не ответила за %s; процесс жив, вывод сервера в %s",
-				s.spec.LoadTimeout, s.LogPath())
+				loadTimeout, s.LogPath())
 		}
 	}
 }
@@ -517,7 +588,8 @@ func (s *Supervisor) launch(ctx context.Context) error {
 		return fmt.Errorf("каталог состояния модели: %w", err)
 	}
 
-	argv := s.spec.Argv(s.binary)
+	spec, binary, _ := s.conf()
+	argv := spec.Argv(binary)
 	unit := "barrymore-model.scope"
 	if s.caps.SystemdRun != "" {
 		// Свежий scope нужен даже если старый остался после павшего процесса:
@@ -557,8 +629,8 @@ func (s *Supervisor) launch(ctx context.Context) error {
 	}
 
 	if err := s.saveIdentity(persisted{
-		Identity: id, StartedAt: startedAt, Endpoint: s.spec.Endpoint(),
-		ModelPath: s.spec.ModelPath, Argv: argv,
+		Identity: id, StartedAt: startedAt, Endpoint: spec.Endpoint(),
+		ModelPath: spec.ModelPath, Argv: argv,
 	}); err != nil {
 		return err
 	}
@@ -568,7 +640,7 @@ func (s *Supervisor) launch(ctx context.Context) error {
 	go func() { _ = cmd.Wait() }()
 
 	s.log.Info("поднимаю локальную модель",
-		"endpoint", s.spec.Endpoint(), "pid", id.PID, "unit", unit, "log", s.LogPath())
+		"endpoint", spec.Endpoint(), "pid", id.PID, "unit", unit, "log", s.LogPath())
 
 	if s.rt != nil {
 		if _, err := s.rt.RecordObservation(ctx, runtime.ObservationRequest{

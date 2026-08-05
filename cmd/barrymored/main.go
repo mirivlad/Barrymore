@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -47,6 +48,8 @@ func run() error {
 
 		lmModel = flag.String("local-model", "",
 			"файл .gguf локальной модели; задан — Бэрримор сам поднимает и стережёт llama-server")
+		lmDir = flag.String("local-models-dir", "",
+			"каталог, где искать модели для выбора в интерфейсе")
 		lmBinary = flag.String("llama-server", "",
 			"путь к llama-server; пусто — third_party/llama.cpp/build/bin, затем PATH")
 		lmPort    = flag.Int("local-model-port", 18080, "порт локального сервера модели")
@@ -59,8 +62,74 @@ func run() error {
 	)
 	flag.Parse()
 
+	// Явно заданный флаг сильнее файла настроек: разовый запуск с другими
+	// параметрами должен быть возможен, не переписывая сохранённый выбор.
+	given := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { given[f.Name] = true })
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: parseLevel(*logLevel)}))
 	slog.SetDefault(logger)
+
+	settings, err := app.LoadSettings(*dataRoot)
+	if err != nil {
+		return err
+	}
+
+	// Первый запуск: то, что можно выяснить самому, выясняется и сохраняется.
+	// Так `barrymored` без флагов находит модель там, где она обычно лежит.
+	firstRun := settings.LocalModel.Binary == "" && settings.LocalModel.Path == ""
+	if firstRun {
+		found, notes := app.Bootstrap(*dataRoot, settings)
+		settings = found
+		for _, n := range notes {
+			logger.Info("первый запуск: " + n)
+		}
+		if err := app.SaveSettings(*dataRoot, settings); err != nil {
+			// Не смертельно: Бэрримор работает и без сохранённых настроек,
+			// просто будет искать заново при каждом запуске.
+			logger.Warn("настройки первого запуска не сохранены", "error", err)
+		}
+	}
+
+	pick := func(name, flagValue, saved string) string {
+		if given[name] || saved == "" {
+			return flagValue
+		}
+		return saved
+	}
+	pickInt := func(name string, flagValue, saved int) int {
+		if given[name] || saved == 0 {
+			return flagValue
+		}
+		return saved
+	}
+
+	*addr = pick("addr", *addr, settings.Addr)
+	*costs = pick("model-policy", *costs, settings.ModelPolicy)
+	*memoryMode = pick("memory-policy", *memoryMode, settings.MemoryPolicy)
+	*provider = pick("provider", *provider, settings.ProviderEndpoint)
+	*providerModel = pick("provider-model", *providerModel, settings.ProviderModel)
+	*providerLabel = pick("provider-label", *providerLabel, settings.ProviderLabel)
+
+	lm := settings.LocalModel
+	*lmModel = pick("local-model", *lmModel, lm.Path)
+	*lmBinary = pick("llama-server", *lmBinary, lm.Binary)
+	*lmPort = pickInt("local-model-port", *lmPort, lm.Port)
+	*lmContext = pickInt("local-model-context", *lmContext, lm.ContextSize)
+	*lmThreads = pickInt("local-model-threads", *lmThreads, lm.Threads)
+	*lmGPU = pickInt("local-model-gpu-layers", *lmGPU, lm.GPULayers)
+	*lmCPUMoE = pickInt("local-model-cpu-moe", *lmCPUMoE, lm.CPUMoE)
+	*lmDir = pick("local-models-dir", *lmDir, lm.ModelsDir)
+	if *lmDir == "" && *lmModel != "" {
+		// Каталог рядом с выбранной моделью — разумное умолчание: соседние
+		// файлы почти всегда и есть остальные модели владельца.
+		*lmDir = filepath.Dir(*lmModel)
+	}
+
+	workspaceRoots := splitRoots(*roots)
+	if !given["workspace-roots"] && len(settings.WorkspaceRoots) > 0 {
+		workspaceRoots = settings.WorkspaceRoots
+	}
 
 	// Внешний bind — отдельное решение владельца, а не побочный эффект запуска.
 	if !strings.HasPrefix(*addr, "127.0.0.1:") && !strings.HasPrefix(*addr, "localhost:") {
@@ -103,9 +172,11 @@ func run() error {
 			Jinja:       true,
 			LoadTimeout: *lmTimeout,
 		},
+		ModelsDir:      *lmDir,
+		Settings:       settings,
 		DataRoot:       *dataRoot,
 		Addr:           *addr,
-		WorkspaceRoots: splitRoots(*roots),
+		WorkspaceRoots: workspaceRoots,
 		TickInterval:   *tick,
 		Logger:         logger,
 	})
@@ -140,7 +211,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		logger.Info("Бэрримор слушает", "addr", *addr, "data_root", *dataRoot)
+		logger.Info("Бэрримор слушает", "addr", "http://"+*addr, "data_root", *dataRoot)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

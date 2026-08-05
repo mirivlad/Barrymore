@@ -274,6 +274,33 @@ func (r *Registry) SetTrust(ctx context.Context, workerID, trust, reason string,
 	return err
 }
 
+// SetEnabled решает, привлекать ли исполнителя вообще.
+//
+// Отключённый исполнитель не исчезает из штата и не притворяется недоступным:
+// он остаётся видимым с честной причиной «отключён владельцем». Подменять
+// решение владельца наблюдением было бы враньём о состоянии системы.
+func (r *Registry) SetEnabled(ctx context.Context, workerID string, enabled bool, reason string, actor event.Actor) error {
+	w, err := r.Get(ctx, workerID)
+	if err != nil {
+		return err
+	}
+	if w.Enabled == enabled {
+		return nil
+	}
+	p := enabledPayload{WorkerID: workerID, Enabled: enabled, Reason: reason,
+		ChangedAt: r.clock.Now()}
+	_, err = r.journal.Write(ctx, func(tx *sql.Tx, tw *event.TxWriter) error {
+		if _, err := tw.Append(ctx, event.Request{
+			StreamType: StreamType, StreamID: workerID, ExpectedRevision: event.AnyRevision,
+			EventType: EvEnabledChanged, Actor: actor, Payload: p,
+		}); err != nil {
+			return err
+		}
+		return applyEnabled(ctx, tx, p)
+	})
+	return err
+}
+
 // Get возвращает исполнителя.
 func (r *Registry) Get(ctx context.Context, id string) (Worker, error) {
 	row := r.db.Reader().QueryRowContext(ctx, selectWorkerColumns+` WHERE id = ?`, id)
@@ -612,6 +639,7 @@ func (r *Registry) Projections(reg *projection.Registry) {
 	reg.On(EvProbed, projectUpsert)
 	reg.On(EvUpdated, projectUpsert)
 	reg.On(EvTrustChanged, projectTrust)
+	reg.On(EvEnabledChanged, projectEnabled)
 	reg.On(EvModelsObserved, projectModels)
 	reg.On(EvModelCostObserved, projectModelCost)
 	reg.OnAudit(EvAvailabilityObserve, EvCapabilityObserved)

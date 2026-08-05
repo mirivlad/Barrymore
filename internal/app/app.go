@@ -54,6 +54,10 @@ type Config struct {
 	// LocalModel описывает сервер локальной модели, если Бэрримор ведёт его сам.
 	// Пустой ModelPath означает, что сервер поднимает владелец.
 	LocalModel localmodel.Spec
+	// ModelsDir — где искать модели для выбора в интерфейсе.
+	ModelsDir string
+	// Settings — сохранённый выбор владельца, прочитанный до запуска.
+	Settings Settings
 }
 
 // App — собранный экземпляр Бэрримора.
@@ -68,6 +72,7 @@ type App struct {
 	Memory     *memory.Service
 	Talk       *conversation.Service
 	LocalModel *localmodel.Supervisor
+	Settings   *SettingsStore
 	Policy     *Policy
 	Projector  *projection.Registry
 	Log        *slog.Logger
@@ -128,6 +133,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 
 	a := &App{Config: cfg, DB: db, Log: cfg.Logger, Clock: cfg.Clock, stopped: make(chan struct{})}
+	a.Settings = NewSettingsStore(cfg.DataRoot, cfg.Settings)
 	a.Journal = event.NewJournal(db, cfg.Clock)
 	a.Policy = NewPolicy(cfg.WorkspaceRoots)
 

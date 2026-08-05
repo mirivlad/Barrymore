@@ -92,6 +92,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/local-model", s.localModelState)
 	mux.HandleFunc("POST /api/v1/local-model/start", s.startLocalModel)
 	mux.HandleFunc("POST /api/v1/local-model/stop", s.stopLocalModel)
+	mux.HandleFunc("GET /api/v1/local-model/available", s.availableModels)
+	mux.HandleFunc("POST /api/v1/local-model/select", s.selectLocalModel)
+
+	mux.HandleFunc("GET /api/v1/settings", s.getSettings)
+	mux.HandleFunc("POST /api/v1/workers/{id}/enabled", s.setWorkerEnabled)
 
 	mux.Handle("/", s.ui())
 
@@ -892,6 +897,142 @@ func (s *Server) stopLocalModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "stopped"})
+}
+
+// availableModels перечисляет файлы моделей, среди которых можно выбирать.
+func (s *Server) availableModels(w http.ResponseWriter, r *http.Request) {
+	dir := s.app.Config.ModelsDir
+	items, err := app.FindModels(dir, s.app.LocalModel.Spec().ModelPath)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "модели не перечислены", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items,
+		"dir":   dir,
+		"note": "перечислены файлы .gguf; пригодность каждого проверяется только " +
+			"запуском, поэтому обещать работоспособность заранее нельзя",
+	})
+}
+
+// selectLocalModel меняет модель и поднимает её заново.
+func (s *Server) selectLocalModel(w http.ResponseWriter, r *http.Request) {
+	// Каждое поле необязательно: отсутствие означает «оставить как было».
+	// Иначе настройка производительности молча стирала бы выбранную модель.
+	var body struct {
+		Path        *string `json:"path"`
+		ContextSize *int    `json:"context_size"`
+		Threads     *int    `json:"threads"`
+		GPULayers   *int    `json:"gpu_layers"`
+		CPUMoE      *int    `json:"cpu_moe"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+
+	next := s.app.LocalModel.Spec()
+	if body.Path != nil {
+		next.ModelPath = strings.TrimSpace(*body.Path)
+	}
+	if body.ContextSize != nil {
+		next.ContextSize = *body.ContextSize
+	}
+	if body.Threads != nil {
+		next.Threads = *body.Threads
+	}
+	if body.GPULayers != nil {
+		next.GPULayers = *body.GPULayers
+	}
+	if body.CPUMoE != nil {
+		next.CPUMoE = *body.CPUMoE
+	}
+
+	if err := s.app.LocalModel.Reconfigure(r.Context(), next); err != nil {
+		writeProblem(w, http.StatusConflict, "модель не выбрана", err.Error())
+		return
+	}
+
+	// Выбор сохраняется сразу: перезапуск Бэрримора не должен возвращать
+	// прежнюю модель, будто владелец ничего не решал.
+	if _, err := s.app.Settings.Update(func(cur app.Settings) app.Settings {
+		cur.LocalModel.Path = next.ModelPath
+		cur.LocalModel.Binary = next.Binary
+		cur.LocalModel.Port = next.Port
+		cur.LocalModel.ContextSize = next.ContextSize
+		cur.LocalModel.Threads = next.Threads
+		cur.LocalModel.GPULayers = next.GPULayers
+		cur.LocalModel.CPUMoE = next.CPUMoE
+		cur.LocalModel.ModelsDir = s.app.Config.ModelsDir
+		return cur
+	}); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "выбор не сохранён", err.Error())
+		return
+	}
+
+	if next.ModelPath != "" {
+		go func() {
+			if _, err := s.app.LocalModel.Ensure(context.WithoutCancel(r.Context())); err != nil {
+				s.app.Log.Warn("выбранная модель не поднялась", "error", err)
+			}
+		}()
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"status": "selected",
+		"note": "модель выбрана и поднимается; загрузка весов занимает минуты, " +
+			"состояние видно в разделе «Состояние»",
+	})
+}
+
+// ---------- настройки ----------
+
+func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
+	cur := s.app.Settings.Get()
+	spec := s.app.LocalModel.Spec()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"settings":  cur,
+		"path":      s.app.Settings.Path(),
+		"data_root": s.app.Config.DataRoot,
+		"addr":      s.app.Config.Addr,
+		"local_model": map[string]any{
+			"path": spec.ModelPath, "port": spec.Port, "context_size": spec.ContextSize,
+			"threads": spec.Threads, "gpu_layers": spec.GPULayers, "cpu_moe": spec.CPUMoE,
+			"models_dir": s.app.Config.ModelsDir,
+		},
+		"workspace_roots": s.app.Policy.Roots(),
+		"model_policy":    s.app.Config.ModelPolicy.Describe(),
+		"memory_policy":   s.app.Memory.Policy().Describe(),
+		// Часть настроек применяется только при запуске. Молчать об этом
+		// значило бы дать владельцу поменять то, что не поменяется.
+		"restart_required": []string{
+			"адрес прослушивания", "разрешённые рабочие каталоги",
+			"порт локальной модели", "политика стоимости", "режим памяти",
+		},
+	})
+}
+
+func (s *Server) setWorkerEnabled(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled bool   `json:"enabled"`
+		Reason  string `json:"reason"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		reason = "решение владельца"
+	}
+	if err := s.app.Registry.SetEnabled(r.Context(), r.PathValue("id"), body.Enabled, reason,
+		event.Actor{Type: event.ActorPerson}); err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	v, err := s.app.Registry.View(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
 // ---------- вспомогательное ----------

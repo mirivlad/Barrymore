@@ -81,7 +81,8 @@ func (s *Supervisor) restartAction(ctx context.Context, in runtime.ReflexInput) 
 // Ожидание не пересоздаётся при каждом запуске: иначе перезапуск Бэрримора
 // плодил бы дубликаты, и одно и то же расхождение считалось бы несколько раз.
 func (s *Supervisor) EnsureExpectation(ctx context.Context) error {
-	if !s.spec.Configured() || s.rt == nil {
+	spec := s.Spec()
+	if !spec.Configured() || s.rt == nil {
 		return nil
 	}
 	existing, err := s.rt.Expectations(ctx, runtime.SubjectProvider, SubjectID)
@@ -94,7 +95,7 @@ func (s *Supervisor) EnsureExpectation(ctx context.Context) error {
 		}
 	}
 
-	basis := "разговорный слой настроен на локальную модель на " + s.spec.Endpoint()
+	basis := "разговорный слой настроен на локальную модель на " + spec.Endpoint()
 	if !s.Enabled() {
 		// Ожидание нужно и тогда, когда Бэрримор не может поднять сервер сам:
 		// он всё равно обязан заметить пропажу и сказать о ней.
@@ -110,17 +111,17 @@ func (s *Supervisor) EnsureExpectation(ctx context.Context) error {
 		SubjectID:   SubjectID,
 		Kind:        runtime.KindLocalModelServing,
 		Params: runtime.ParamsLocalModelServing{
-			Endpoint:   s.spec.Endpoint(),
-			CheckEvery: s.spec.ObserveEvery * 2,
+			Endpoint:   spec.Endpoint(),
+			CheckEvery: spec.ObserveEvery * 2,
 			// Молчание наблюдателя дольше десяти интервалов означает, что
 			// состояние неизвестно. Это не то же самое, что исправность.
-			SilenceAfter: s.spec.ObserveEvery * 10,
+			SilenceAfter: spec.ObserveEvery * 10,
 		},
 		Basis:            basis,
 		Confidence:       0.9,
 		SeverityIfMissed: runtime.SeverityWarning,
-		CheckInterval:    s.spec.ObserveEvery * 2,
-		FirstCheckAfter:  s.spec.ObserveEvery,
+		CheckInterval:    spec.ObserveEvery * 2,
+		FirstCheckAfter:  spec.ObserveEvery,
 		ReactionPolicy:   reaction,
 		Actor:            event.Actor{Type: event.ActorRuntime},
 	})
