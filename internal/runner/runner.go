@@ -191,6 +191,16 @@ func (r *Runner) Start(ctx context.Context, req StartRequest) (StartResult, erro
 		StdoutPath: stdoutPath, StderrPath: stderrPath, StartedAt: startedAt,
 	}
 
+	// Идентичность запоминается здесь, до подключения читателя.
+	//
+	// Читатель вывода останавливается, когда файл пуст и процесс мёртв.
+	// Живость он определяет по этой самой записи — и пока её нет, любой
+	// процесс выглядит мёртвым. Оставлять регистрацию вызывающему значило
+	// оставлять окно, в котором читатель сдаётся через восемьдесят
+	// миллисекунд, не дождавшись первой строки, и весь поток событий
+	// исполнителя пропадал молча.
+	RememberIdentity(req.RunID, id)
+
 	if _, err := r.rt.RecordObservation(ctx, runtime.ObservationRequest{
 		Kind:        runtime.ObsRunStarted,
 		SubjectType: runtime.SubjectWorkerRun,

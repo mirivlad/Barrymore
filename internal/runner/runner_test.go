@@ -477,3 +477,39 @@ func TestSandboxLifetimeMatchesItsOwner(t *testing.T) {
 		}
 	}
 }
+
+// Читатель вывода не должен сдаваться раньше, чем исполнитель заговорит.
+//
+// Он останавливается, когда файл пуст и процесс мёртв, а живость определяет
+// по записанной идентичности. Пока записи нет, любой процесс выглядит мёртвым:
+// читатель уходил через восемьдесят миллисекунд, и весь поток событий
+// исполнителя пропадал молча. Под нагрузкой это проявлялось как «тест иногда
+// не дожидается событий».
+func TestOutputIsReadEvenWhenWorkerIsSlowToSpeak(t *testing.T) {
+	ctx := context.Background()
+	sink := &recordingSink{}
+	r, rt := newRunner(t, sink)
+
+	// Исполнитель молчит дольше, чем читатель ждал бы без идентичности.
+	a := &shAdapter{script: `
+		sleep 1
+		echo '{"summary":"наконец-то заговорил"}'`}
+	plan, _ := a.Plan(ctx, worker.Installation{}, worker.RunRequest{})
+
+	res, err := r.Start(ctx, runner.StartRequest{
+		RunID: "run_slow_talker", Adapter: a, Plan: plan, RunDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("запуск: %v", err)
+	}
+	// RememberIdentity намеренно не вызывается: Start обязан справиться сам.
+	t.Cleanup(func() { _ = runner.Terminate(r.Capabilities(), res.Identity, true) })
+
+	waitFor(t, "процесс завершился", func() bool {
+		_, _, _, exited := sink.snapshot()
+		return exited
+	})
+	waitFor(t, "запоздалое событие прочитано", func() bool {
+		return len(observationsOf(t, rt, "run_slow_talker", runtime.ObsRunEvent)) == 1
+	})
+}
