@@ -188,7 +188,10 @@ func (h *harness) approveAndStart(t *testing.T, p delegation.Proposal) delegatio
 		// Ждём терминального состояния поручения, а не просто ухода запуска
 		// из активных: приёмка идёт уже после отметки о завершении и сама
 		// обходит рабочий каталог, который вот-вот удалят.
-		deadline := time.Now().Add(10 * time.Second)
+		// Запас намеренно велик: под параллельным прогоном пакетов запуск
+		// песочницы через bwrap и systemd-run занимает заметно дольше обычного,
+		// и тест, падающий от чужой нагрузки, ничего не проверяет — он мешает.
+		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
 			o, err := h.deleg.Get(context.Background(), p.Order.ID)
 			if err != nil {

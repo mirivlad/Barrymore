@@ -16,6 +16,7 @@ import (
 	"github.com/mirivlad/barrymore/internal/conversation"
 	"github.com/mirivlad/barrymore/internal/delegation"
 	"github.com/mirivlad/barrymore/internal/event"
+	"github.com/mirivlad/barrymore/internal/initiative"
 	"github.com/mirivlad/barrymore/internal/localmodel"
 	"github.com/mirivlad/barrymore/internal/memory"
 	"github.com/mirivlad/barrymore/internal/model"
@@ -51,6 +52,8 @@ type Config struct {
 	ProviderAPIKey string
 	// MemoryPolicy задаёт, что Бэрримор записывает сам.
 	MemoryPolicy memory.Policy
+	// InitiativePolicy задаёт рамки, в которых Бэрримор обращается первым.
+	InitiativePolicy initiative.Policy
 	// LocalModel описывает сервер локальной модели, если Бэрримор ведёт его сам.
 	// Пустой ModelPath означает, что сервер поднимает владелец.
 	LocalModel localmodel.Spec
@@ -72,6 +75,7 @@ type App struct {
 	Memory     *memory.Service
 	Talk       *conversation.Service
 	LocalModel *localmodel.Supervisor
+	Initiative *initiative.Service
 	Settings   *SettingsStore
 	Policy     *Policy
 	Projector  *projection.Registry
@@ -196,6 +200,10 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		Identity: identity,
 	})
 
+	a.Initiative = initiative.NewService(db, a.Journal, cfg.Clock,
+		cfg.InitiativePolicy, cfg.Logger)
+	a.Initiative.AddSource(workSource{app: a})
+
 	a.Projector = projection.NewRegistry()
 	a.Runtime.Projections(a.Projector)
 	a.Threads.Projections(a.Projector)
@@ -203,6 +211,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	a.Delegation.Projections(a.Projector)
 	a.Memory.Projections(a.Projector)
 	a.Talk.Projections(a.Projector)
+	a.Initiative.Projections(a.Projector)
 
 	a.collectStartupNotes()
 	return a, nil
@@ -252,6 +261,8 @@ func (a *App) collectStartupNotes() {
 		"политика стоимости: "+a.Config.ModelPolicy.Describe())
 	a.StartupNotes = append(a.StartupNotes,
 		"память: "+a.Memory.Policy().Describe())
+	a.StartupNotes = append(a.StartupNotes,
+		"инициатива: "+a.Initiative.Policy().Describe())
 	if !a.Talk.Available() {
 		a.StartupNotes = append(a.StartupNotes,
 			"разговорный слой не настроен: Бэрримор не разговаривает, "+
@@ -377,6 +388,20 @@ func (a *App) tickLoop(ctx context.Context) {
 				a.Log.Info("предиктивный контур",
 					"проверено", res.Checked, "расхождений", res.Discrepancies,
 					"реакций", res.Reflexes, "эскалаций", res.Escalations)
+			}
+
+			// Инициатива — не отдельный демон, а следствие того, что Бэрримор
+			// и так наблюдает: поводы берутся из уже установленных фактов.
+			created, delivered, err := a.Initiative.Tick(ctx)
+			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
+				a.Log.Error("инициатива прервана", "error", err)
+				continue
+			}
+			if created > 0 || delivered > 0 {
+				a.Log.Info("инициатива", "поводов", created, "показано", delivered)
 			}
 		}
 	}

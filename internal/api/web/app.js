@@ -1187,6 +1187,106 @@ let sending = false;
 // показывать ожидание, а не притворяться, что ничего не происходит.
 const PROVIDER_TONE = { ready: "ok", unreachable: "bad", not_configured: "warn", broken: "bad" };
 
+// ---------- инициатива ----------
+
+// loadNotices показывает то, о чём Бэрримор решил сказать сам.
+//
+// 07_USER_EXPERIENCE §4: каждое обращение отвечает на «почему сейчас».
+// Поэтому причина показывается всегда и наравне с заголовком, а не прячется
+// под раскрытием: без неё обращение неотличимо от напоминания ради напоминания.
+const NOTICE_TONE = { urgent: "bad", attention: "warn", routine: "" };
+const LEVEL_LABEL = {
+  urgent: "нужно ваше решение",
+  attention: "стоит знать",
+  routine: "к сведению",
+};
+
+async function loadNotices() {
+  const box = $("notices");
+  const badge = $("notice-badge");
+  try {
+    const d = await api("/api/v1/notices");
+    const waiting = d.waiting || [];
+    const kinds = {};
+    for (const r of d.reasons || []) kinds[r.kind] = r.label;
+
+    badge.hidden = waiting.length === 0;
+    badge.textContent = waiting.length ? `${waiting.length} от Бэрримора` : "";
+
+    if (!waiting.length && !d.held_count) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    box.innerHTML = `
+      <div class="row">
+        <h2 style="margin:0">Бэрримор хочет сказать</h2>
+        <span class="grow"></span>
+        ${techNote(esc(d.policy?.enabled ? "инициатива включена" : "инициатива выключена"))}
+      </div>
+      <ul class="plain">${waiting.map((n) => `
+        <li>
+          <div class="row">
+            ${tag(LEVEL_LABEL[n.level] || n.level, NOTICE_TONE[n.level])}
+            <strong>${esc(n.title)}</strong>
+            <span class="grow"></span>
+            <span class="muted">${ago(n.created_at)}</span>
+          </div>
+          <div class="muted" style="margin-top:4px">Почему сейчас: ${esc(n.why)}</div>
+          <div class="row" style="margin-top:6px">
+            ${
+              n.subject_type === "work_order"
+                ? `<button class="ghost" onclick="showTab('orders');openOrder('${esc(n.subject_id)}')">Открыть</button>`
+                : ""
+            }
+            ${
+              n.subject_type === "memory"
+                ? `<button class="ghost" onclick="showTab('memory')">Открыть память</button>`
+                : ""
+            }
+            <button class="ghost" onclick="readNotice('${esc(n.id)}')">Понятно</button>
+            <button class="ghost" onclick="muteNotice('${esc(n.kind)}')">Не сообщать о таком</button>
+            ${techNote(esc(kinds[n.kind] || n.kind))}
+          </div>
+        </li>`).join("")}</ul>
+      ${
+        d.held_count
+          ? `<div class="muted" style="margin-top:8px">Ещё ${d.held_count}: ${esc(d.held_reason || "")}</div>`
+          : ""
+      }`;
+  } catch {
+    box.hidden = true;
+    badge.hidden = true;
+  }
+}
+
+window.readNotice = async (id) => {
+  try {
+    await api(`/api/v1/notices/${id}/read`, { method: "POST" });
+  } catch (err) {
+    alert(err.message);
+  }
+  loadNotices();
+};
+
+window.muteNotice = async (kind) => {
+  if (!confirm("Больше не сообщать о таком? Наблюдать Бэрримор не перестанет — " +
+      "просто не будет обращаться первым.")) return;
+  try {
+    await api("/api/v1/notices/mute", {
+      method: "POST", body: JSON.stringify({ kind }),
+    });
+  } catch (err) {
+    alert(err.message);
+  }
+  loadNotices();
+};
+
+$("notice-badge").addEventListener("click", () => {
+  showTab("talk");
+  $("notices").scrollIntoView({ behavior: "smooth", block: "start" });
+});
+
 // loadWelcome показывает первое знакомство, пока разговоров ещё не было.
 //
 // Это не мастер настройки: он ничего не настраивает за владельца, а честно
@@ -1276,6 +1376,7 @@ async function loadTalk() {
     if (currentConversation) await loadChat();
     else $("chat").innerHTML = `<div class="muted">Начните новый разговор.</div>`;
     await loadWelcome(items.length);
+    await loadNotices();
   } catch (err) {
     $("talk-provider").innerHTML = `<span class="tag bad">ошибка</span> ${esc(err.message)}`;
   }
@@ -1874,4 +1975,7 @@ setInterval(() => {
   if (sending) return;
   const current = document.querySelector('nav button[aria-current="true"]');
   if (current && current.dataset.tab !== "talk") refresh(current.dataset.tab);
+  // Значок обновляется на любой вкладке: обращение Бэрримора не должно
+  // ждать, пока владелец сам заглянет в Приёмную.
+  loadNotices();
 }, 10000);

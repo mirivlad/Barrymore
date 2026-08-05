@@ -111,7 +111,10 @@ func newRunner(t *testing.T, sink runner.Sink) (*runner.Runner, *runtime.Runtime
 
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	// Запас намеренно велик: под параллельным прогоном пакетов запуск
+	// песочницы через bwrap и systemd-run занимает заметно дольше обычного,
+	// и тест, падающий от чужой нагрузки, ничего не проверяет — он мешает.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return

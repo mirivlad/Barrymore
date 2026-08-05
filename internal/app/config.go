@@ -23,6 +23,8 @@ type Settings struct {
 	WorkspaceRoots []string `json:"workspace_roots,omitempty"`
 	ModelPolicy    string   `json:"model_policy,omitempty"`
 	MemoryPolicy   string   `json:"memory_policy,omitempty"`
+	// Initiative — когда Бэрримор обращается первым: on, urgent-only, off.
+	Initiative string `json:"initiative,omitempty"`
 
 	// LocalModel — какую локальную модель поднимать.
 	LocalModel LocalModelSettings `json:"local_model"`

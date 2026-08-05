@@ -19,6 +19,7 @@ import (
 	"github.com/mirivlad/barrymore/internal/conversation"
 	"github.com/mirivlad/barrymore/internal/delegation"
 	"github.com/mirivlad/barrymore/internal/event"
+	"github.com/mirivlad/barrymore/internal/initiative"
 	"github.com/mirivlad/barrymore/internal/memory"
 	"github.com/mirivlad/barrymore/internal/runtime"
 	"github.com/mirivlad/barrymore/internal/thread"
@@ -96,6 +97,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/local-model/stop", s.stopLocalModel)
 	mux.HandleFunc("GET /api/v1/local-model/available", s.availableModels)
 	mux.HandleFunc("POST /api/v1/local-model/select", s.selectLocalModel)
+
+	mux.HandleFunc("GET /api/v1/notices", s.listNotices)
+	mux.HandleFunc("POST /api/v1/notices/{id}/read", s.readNotice)
+	mux.HandleFunc("POST /api/v1/notices/mute", s.muteNotices)
+	mux.HandleFunc("POST /api/v1/notices/unmute", s.unmuteNotices)
 
 	mux.HandleFunc("GET /api/v1/settings", s.getSettings)
 	mux.HandleFunc("POST /api/v1/settings/workspace-roots", s.addWorkspaceRoot)
@@ -636,6 +642,7 @@ func (s *Server) grantApproval(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusConflict, "подтверждение не выдано", err.Error())
 		return
 	}
+	s.withdrawNotice("approval_waiting:"+a.WorkOrderID, "владелец подтвердил поручение")
 	writeJSON(w, http.StatusOK, a)
 }
 
@@ -1169,12 +1176,16 @@ func (s *Server) applyChanges(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength > 0 && !decode(w, r, &body) {
 		return
 	}
-	res, err := s.app.Delegation.ApplyChanges(r.Context(), r.PathValue("id"), body.Note,
+	id := r.PathValue("id")
+	res, err := s.app.Delegation.ApplyChanges(r.Context(), id, body.Note,
 		event.Actor{Type: event.ActorPerson})
 	if err != nil {
 		writeProblem(w, http.StatusConflict, "изменения не применены", err.Error())
 		return
 	}
+	// Повод отпал: звать разбираться с тем, что владелец только что решил, —
+	// мелкая, но обидная потеря доверия.
+	s.withdrawNotice("changes.waiting:"+id, "владелец применил изменения")
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -1185,13 +1196,95 @@ func (s *Server) discardChanges(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength > 0 && !decode(w, r, &body) {
 		return
 	}
-	if err := s.app.Delegation.DiscardChanges(r.Context(), r.PathValue("id"), body.Note,
+	id := r.PathValue("id")
+	if err := s.app.Delegation.DiscardChanges(r.Context(), id, body.Note,
 		event.Actor{Type: event.ActorPerson}); err != nil {
 		writeProblem(w, http.StatusConflict, "изменения не отброшены", err.Error())
 		return
 	}
+	s.withdrawNotice("changes.waiting:"+id, "владелец отказался от изменений")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status": "discarded",
 		"note":   "копия удалена; каталог остался таким, каким был",
 	})
+}
+
+// ---------- инициатива ----------
+
+// listNotices отдаёт то, что Бэрримор хочет сказать сам.
+func (s *Server) listNotices(w http.ResponseWriter, r *http.Request) {
+	sum, err := s.app.Initiative.Pending(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "обращения недоступны", err.Error())
+		return
+	}
+	all, err := s.app.Initiative.List(r.Context(), 50)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "обращения недоступны", err.Error())
+		return
+	}
+	reasons := []map[string]string{}
+	for _, x := range initiative.Reasons() {
+		reasons = append(reasons, map[string]string{"kind": x.Kind, "label": x.Label})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"waiting":     sum.Waiting,
+		"held_count":  sum.HeldCount,
+		"held_reason": sum.HeldReason,
+		"policy":      sum.Policy,
+		"history":     all,
+		"reasons":     reasons,
+	})
+}
+
+func (s *Server) readNotice(w http.ResponseWriter, r *http.Request) {
+	if err := s.app.Initiative.MarkRead(r.Context(), r.PathValue("id")); err != nil {
+		writeProblem(w, http.StatusBadRequest, "обращение не отмечено", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "read"})
+}
+
+// muteNotices просит молчать о поводе или о конкретном предмете.
+//
+// Заглушка не отменяет наблюдение: Бэрримор продолжает знать о происходящем,
+// он лишь не обращается первым. Иначе «не беспокоить» превращалось бы
+// в «не замечать».
+func (s *Server) muteNotices(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Kind      string `json:"kind"`
+		SubjectID string `json:"subject_id"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	p := s.app.Initiative.Mute(body.Kind, body.SubjectID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"policy": p,
+		"note": "Бэрримор продолжает наблюдать за этим, но обращаться первым " +
+			"не станет; всё видно в разделе «Состояние»",
+	})
+}
+
+func (s *Server) unmuteNotices(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Kind      string `json:"kind"`
+		SubjectID string `json:"subject_id"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"policy": s.app.Initiative.Unmute(body.Kind, body.SubjectID),
+	})
+}
+
+// withdrawNotice снимает обращение, повод которого отпал.
+//
+// Ошибка здесь не должна ломать основное действие: владелец уже принял
+// решение, и отказывать ему из-за неубранного уведомления было бы нелепо.
+func (s *Server) withdrawNotice(dedupeKey, reason string) {
+	if err := s.app.Initiative.MarkStale(context.Background(), dedupeKey, reason); err != nil {
+		s.log.Warn("обращение не снято", "key", dedupeKey, "error", err)
+	}
 }

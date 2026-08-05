@@ -17,6 +17,7 @@ import (
 
 	"github.com/mirivlad/barrymore/internal/api"
 	"github.com/mirivlad/barrymore/internal/app"
+	"github.com/mirivlad/barrymore/internal/initiative"
 	"github.com/mirivlad/barrymore/internal/localmodel"
 	"github.com/mirivlad/barrymore/internal/memory"
 	"github.com/mirivlad/barrymore/internal/worker"
@@ -45,6 +46,8 @@ func run() error {
 		providerLabel = flag.String("provider-label", "локальная модель", "как называть провайдера")
 		memoryMode    = flag.String("memory-policy", "auto-safe",
 			"что Бэрримор записывает сам: ask, auto-safe, auto")
+		initMode = flag.String("initiative", "on",
+			"когда Бэрримор обращается первым: on, urgent-only, off")
 
 		lmModel = flag.String("local-model", "",
 			"файл .gguf локальной модели; задан — Бэрримор сам поднимает и стережёт llama-server")
@@ -107,6 +110,7 @@ func run() error {
 	*addr = pick("addr", *addr, settings.Addr)
 	*costs = pick("model-policy", *costs, settings.ModelPolicy)
 	*memoryMode = pick("memory-policy", *memoryMode, settings.MemoryPolicy)
+	*initMode = pick("initiative", *initMode, settings.Initiative)
 	*provider = pick("provider", *provider, settings.ProviderEndpoint)
 	*providerModel = pick("provider-model", *providerModel, settings.ProviderModel)
 	*providerLabel = pick("provider-label", *providerLabel, settings.ProviderLabel)
@@ -150,9 +154,15 @@ func run() error {
 		return err
 	}
 
+	initPolicy, err := initiative.ParsePolicy(*initMode)
+	if err != nil {
+		return err
+	}
+
 	a, err := app.New(ctx, app.Config{
 		ModelPolicy:      policy,
 		MemoryPolicy:     memPolicy,
+		InitiativePolicy: initPolicy,
 		ProviderEndpoint: *provider,
 		ProviderModel:    *providerModel,
 		ProviderLabel:    *providerLabel,
