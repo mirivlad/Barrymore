@@ -1176,12 +1176,19 @@ async function send() {
 
 // renderProposals показывает предложения отдельно от ответа: они ничего
 // не меняют до вашего решения.
+// lastProposals хранит предложения последнего хода, чтобы кнопка «оформить»
+// могла взять их целиком, не вытаскивая текст обратно из разметки.
+let lastProposals = [];
+let lastThreadID = "";
+
 function renderProposals(turn) {
   const p = turn.proposal || {};
   const cands = turn.memory_candidates || [];
   const orders = p.work_order_proposals || [];
   const questions = p.open_questions || [];
   const pos = p.thread_position;
+  lastProposals = orders;
+  lastThreadID = turn.reply?.thread_id || "";
 
   if (!cands.length && !orders.length && !questions.length && !pos) {
     $("talk-proposals").hidden = true;
@@ -1196,7 +1203,7 @@ function renderProposals(turn) {
       pos
         ? `<div style="margin-top:8px"><strong style="font-size:13px">Его позиция по нити</strong>
            <div>${esc(pos.statement)}</div>
-           <div class="muted">уверенность ${pos.confidence} · ${esc(pos.basis)}</div></div>`
+           <div class="muted">${confidenceWord(pos.confidence)} · ${esc(pos.basis)}</div></div>`
         : ""
     }
     ${
@@ -1218,11 +1225,18 @@ function renderProposals(turn) {
     ${
       orders.length
         ? `<div style="margin-top:10px"><strong style="font-size:13px">Поручить исполнителю</strong>
-           <ul class="plain">${orders.map((o) => `
-             <li><div>${esc(o.goal)}</div><div class="muted">${esc(o.why)}</div></li>`).join("")}
+           <ul class="plain">${orders.map((o, i) => `
+             <li>
+               <div>${esc(o.goal)}</div>
+               <div class="muted">${esc(o.why)}</div>
+               <div class="row" style="margin-top:6px">
+                 <button class="ghost" onclick="draftOrder(${i})">Оформить поручение</button>
+                 ${o.workspace_hint ? `<span class="muted">${esc(o.workspace_hint)}</span>` : ""}
+               </div>
+             </li>`).join("")}
            </ul>
-           <div class="muted">Поручение создаётся на вкладке «Поручения»: там выбирается
-           исполнитель, модель и требуется ваше подтверждение.</div></div>`
+           <div class="muted">Само поручение не создаётся: сначала выбирается исполнитель
+           и модель, и требуется ваше подтверждение.</div></div>`
         : ""
     }
     ${
@@ -1232,6 +1246,32 @@ function renderProposals(turn) {
         : ""
     }`;
 }
+
+// draftOrder переносит предложение в форму поручения.
+//
+// Именно переносит, а не создаёт: исполнитель, модель и подтверждение владельца
+// остаются впереди. Заставлять перепечатывать цель руками — единственное, чего
+// здесь можно избежать без потери контроля.
+window.draftOrder = (index) => {
+  const p = lastProposals[index];
+  if (!p) return;
+  showTab("orders");
+  $("wo-goal").value = p.goal;
+  if (p.workspace_hint) $("wo-root").value = p.workspace_hint;
+  const select = $("wo-thread");
+  if (lastThreadID && select) {
+    // Выбор нити переживает перерисовку списка: она загружается асинхронно.
+    const apply = () => {
+      if ([...select.options].some((o) => o.value === lastThreadID)) {
+        select.value = lastThreadID;
+      } else {
+        setTimeout(apply, 200);
+      }
+    };
+    apply();
+  }
+  $("wo-goal").focus();
+};
 
 $("talk-send").addEventListener("click", send);
 $("talk-input").addEventListener("keydown", (e) => {
