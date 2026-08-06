@@ -2743,6 +2743,7 @@ async function loadSettings() {
       <p style="margin-top:10px">Меняется только перезапуском: ${
         (s.restart_required || []).map(esc).join(", ")
       }.</p>`;
+    renderCostPolicy(s);
   } catch (err) {
     $("settings-launch").textContent = err.message;
   }
@@ -2840,6 +2841,49 @@ $("tune-apply").addEventListener("click", async () => {
   }
   loadSettings();
 });
+
+// renderCostPolicy показывает выбор в тех словах, в каких он принимается.
+//
+// Не «free / prefer-free / any», а «чем можно платить»: владелец решает про
+// свои деньги, а не про имя политики в коде.
+function renderCostPolicy(d) {
+  const box = $("cost-policy");
+  if (!box) return;
+  const current = d.model_policy || "";
+  box.innerHTML = (d.model_policies || []).map((p) => `
+    <li>
+      <label class="switch" style="align-items:flex-start">
+        <input type="radio" name="cost-policy" value="${esc(p.name)}"
+          ${current === describeCost(p.name) ? "checked" : ""}>
+        <span>
+          <span style="color:var(--ink)">${esc(p.title)}</span>
+          <span class="muted" style="display:block">${esc(p.why)}</span>
+        </span>
+      </label>
+    </li>`).join("");
+  box.querySelectorAll("input[name=cost-policy]").forEach((el) => {
+    el.addEventListener("change", async () => {
+      try {
+        await api("/api/v1/settings/model-policy", {
+          method: "POST", body: JSON.stringify({ name: el.value }),
+        });
+        loadSettings();
+      } catch (err) {
+        alert(`Политика не изменена: ${err.message}`);
+      }
+    });
+  });
+}
+
+// describeCost повторяет формулировку сервера: сравнивать надо с тем, что
+// сервер и вернул, иначе отметка не встанет ни на один вариант.
+function describeCost(name) {
+  switch (name) {
+    case "free": return "только бесплатные модели";
+    case "any": return "разрешены любые модели, включая платные; бесплатные предпочтительнее";
+    default: return "бесплатные и входящие в подписку; платные запрещены";
+  }
+}
 
 function refresh(tab) {
   if (tab === "talk") loadTalk();

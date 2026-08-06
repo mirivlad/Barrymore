@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mirivlad/barrymore/internal/clock"
 	"github.com/mirivlad/barrymore/internal/event"
@@ -214,31 +215,56 @@ func TestSkillOnPlainDirectorySaysSoWithoutFailing(t *testing.T) {
 	}
 }
 
-// Владелец спросил «сколько свободного места», модель ответила выдуманным
-// числом — потому что умение требовало каталог и на общий вопрос его не звали.
-// Теперь умение отвечает на тот же вопрос, что и `df -h`, и каталога не просит.
-func TestFreeSpaceAnswersWithoutATarget(t *testing.T) {
-	h := newHarness(t, openPolicy{})
-	run, err := h.svc.Apply(context.Background(), skill.Request{SkillID: skill.SkillFreeSpace})
-	if err != nil {
-		t.Fatalf("умение потребовало каталог там, где его не бывает: %v", err)
+// --- окружение вместо умения ---
+
+// Владелец спросил «сколько свободного места» — модель ответила выдуманным
+// числом. Заводить на это умение было бы началом гонки: завтра спросят дату,
+// послезавтра имя машины, и на каждый непредусмотренный вопрос ответом
+// снова была бы выдумка.
+//
+// Поэтому дешёвые факты о машине не умение, а окружение: runtime наблюдает
+// их сам и кладёт в контекст каждый ход.
+func TestAmbientAnswersWhatNeedsNoTarget(t *testing.T) {
+	facts := skill.Ambient(context.Background())
+	if len(facts) == 0 {
+		t.Fatal("окружение пусто: модели нечем отвечать, кроме выдумки")
 	}
-	if run.Status != skill.StatusDone {
-		t.Fatalf("не сработало: %+v", run)
+	all := ""
+	for _, f := range facts {
+		all += f.Text + "\n"
 	}
-	if len(run.Steps[0].Facts) == 0 {
-		t.Fatal("ни одна файловая система не названа")
-	}
-	// Ответ должен указывать на самое узкое место, а не усреднять.
-	if !strings.Contains(run.Answer, "Теснее всего") {
-		t.Fatalf("ответ не называет, где место кончается: %q", run.Answer)
+	for _, must := range []string{"машина:", "память:", "место на дисках:"} {
+		if !strings.Contains(all, must) {
+			t.Fatalf("в окружении нет «%s»:\n%s", must, all)
+		}
 	}
 	// Псевдофайловые системы — шум, в котором тонет настоящий ответ.
-	for _, f := range run.Steps[0].Facts {
-		for _, noise := range []string{"/proc ", "/sys ", "/dev "} {
-			if strings.HasPrefix(f.Text, noise) {
-				t.Fatalf("в ответе служебная файловая система: %q", f.Text)
-			}
+	for _, noise := range []string{"/proc ", "/sys ", "/dev "} {
+		if strings.Contains(all, noise) {
+			t.Fatalf("в окружении служебная файловая система «%s»:\n%s", noise, all)
+		}
+	}
+}
+
+// Наблюдение окружения обязано быть дешёвым: оно делается на каждом ходу.
+func TestAmbientIsCheapEnoughForEveryTurn(t *testing.T) {
+	start := time.Now()
+	for i := 0; i < 20; i++ {
+		skill.Ambient(context.Background())
+	}
+	per := time.Since(start) / 20
+	if per > 50*time.Millisecond {
+		t.Fatalf("окружение стоит %v за раз — это уже не «просто знает»", per)
+	}
+}
+
+// Умение заводится только там, где нужна цель. Это правило, а не вкус:
+// без него список умений растёт вслед за списком вопросов.
+func TestEveryBuiltinSkillNeedsATarget(t *testing.T) {
+	for _, sk := range skill.Builtin() {
+		if !sk.NeedsTarget {
+			t.Fatalf("умение %q не требует цели — такому место в окружении, "+
+				"а не в списке умений", sk.ID)
 		}
 	}
 }
@@ -344,7 +370,7 @@ func TestRetirementSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, openPolicy{})
 	const why = "на этом хосте примитив врёт"
-	if err := h.svc.Retire(ctx, skill.SkillFreeSpace, why,
+	if err := h.svc.Retire(ctx, skill.SkillWhoIsWorking, why,
 		event.Actor{Type: event.ActorBarrymore}); err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +378,7 @@ func TestRetirementSurvivesRestart(t *testing.T) {
 	if err := after.Restore(ctx); err != nil {
 		t.Fatal(err)
 	}
-	sk, ok := after.Get(skill.SkillFreeSpace)
+	sk, ok := after.Get(skill.SkillWhoIsWorking)
 	if !ok {
 		t.Fatal("встроенное умение пропало вовсе")
 	}

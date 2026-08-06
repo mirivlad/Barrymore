@@ -10,16 +10,21 @@ import (
 const (
 	SkillSurvey        = "workspace.survey"
 	SkillWorktree      = "git.worktree.diagnose"
-	SkillFreeSpace     = "host.space"
 	SkillWhoIsWorking  = "workspace.who"
 	skillDefaultCommit = "5"
 )
 
 // Builtin возвращает то, что Бэрримор умеет с самого начала.
 //
-// Список короткий намеренно. Умение попадает сюда не потому, что его можно
-// написать, а потому, что за ним раньше звали исполнителя: каждое из них
-// закрывает вопрос, ради которого запускался внешний процесс на минуту.
+// Список короткий намеренно, и держать его коротким — правило, а не лень.
+// Умение заводится только там, где нужна цель: какой каталог, какой
+// репозиторий, чей процесс. Всё, что можно узнать о машине без цели и за
+// миллисекунды, умением не становится никогда — оно попадает в окружение
+// (см. Ambient) и просто известно.
+//
+// Иначе список умений рос бы вслед за списком вопросов и всё равно не
+// поспевал: на первый же непредусмотренный вопрос модель ответила бы
+// выдумкой, а мы бы дописывали умение задним числом.
 func Builtin() []Skill {
 	return []Skill{
 		{
@@ -69,20 +74,6 @@ func Builtin() []Skill {
 					Why: "найти процессы, работающие внутри"},
 			},
 			Summarize: summarizeHolders,
-		},
-		{
-			ID:    SkillFreeSpace,
-			Title: "проверить свободное место на дисках",
-			Question: "сколько свободного места на дисках и не кончается ли оно " +
-				"где-нибудь",
-			NeedsTarget: false,
-			Origin:      OriginBuiltin,
-			Enabled:     true,
-			Steps: []Step{
-				{Primitive: PrimHostFreeSpace, Args: map[string]string{"path": Target},
-					Why: "измерить свободное место по всем файловым системам"},
-			},
-			Summarize: summarizeSpace,
 		},
 	}
 }
@@ -146,25 +137,6 @@ func summarizeSurvey(steps []StepResult) string {
 	}
 	return fmt.Sprintf("Репозиторий на ветке %s, файлов %s, %s.",
 		nonEmpty(branch, "без имени"), files, state)
-}
-
-// summarizeSpace называет самое узкое место, а не среднее по больнице.
-func summarizeSpace(steps []StepResult) string {
-	free := signal(steps, PrimHostFreeSpace, "free_pct")
-	where := signal(steps, PrimHostFreeSpace, "tightest")
-	n := num(signal(steps, PrimHostFreeSpace, "mounts"))
-	if where == "" {
-		return ""
-	}
-	pct := num(free)
-	tone := "места хватает"
-	if pct < 10 {
-		tone = "места почти нет"
-	} else if pct < 20 {
-		tone = "места остаётся немного"
-	}
-	return fmt.Sprintf("Проверил %d файловых систем: %s. Теснее всего на %s — "+
-		"свободно %d%%. Подробности ниже.", n, tone, where, pct)
 }
 
 func summarizeHolders(steps []StepResult) string {

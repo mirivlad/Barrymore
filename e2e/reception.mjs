@@ -396,6 +396,34 @@ esac
     }
   }
 
+  console.log("Пока Бэрримор думает:");
+
+  await check("вопрос и секундомер переживают уход на другую вкладку", async () => {
+    await page.locator("#talk-input").fill("Не спеши, подумай как следует");
+    await page.locator("#talk-send").click();
+    await page.locator("#thinking").waitFor({ timeout: 5000 });
+
+    // Владелец ушёл посмотреть нити и вернулся. Раньше на этом месте его
+    // ждал пустой экран, будто он спросил в пустоту.
+    await page.locator("nav button[data-tab='threads']").click();
+    await page.waitForTimeout(800);
+    await page.locator("nav button[data-tab='talk']").click();
+
+    const chat = await page.locator("#chat").innerText();
+    if (!chat.includes("Не спеши")) throw new Error("реплика владельца стёрта");
+    if (!(await page.locator("#thinking").count())) {
+      throw new Error("ожидание стёрто: экран молчит, будто ничего не спрашивали");
+    }
+  });
+
+  await check("ответ всё равно приходит на место", async () => {
+    // Ждём именно исчезновения секундомера: искать текст ответа бесполезно,
+    // он уже есть выше от прошлых ходов.
+    await page.locator("#thinking").waitFor({ state: "detached", timeout: 30000 });
+    const bubbles = await page.locator("#chat .bubble.barrymore").count();
+    if (bubbles < 2) throw new Error("ответ не появился");
+  });
+
   console.log("Бэрримор делает сам:");
 
   await check("вместо поручения предложено собственное умение", async () => {

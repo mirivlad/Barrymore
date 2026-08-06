@@ -99,6 +99,8 @@ func New(cfg Config) *Service {
 // показала сама (тот же порядок, что и с нитями, ADR 0018).
 type SkillCatalog interface {
 	Live() []skill.Skill
+	// Ambient — то, что видно о машине без всякого умения.
+	Ambient(ctx context.Context) []skill.Fact
 }
 
 // PracticeCatalog отдаёт то, чему научил опыт.
@@ -551,6 +553,25 @@ func (s *Service) buildContext(ctx context.Context, conv Conversation) (
 			Title: "Нити, которые уже есть", Body: b.String(),
 		})
 		trace = append(trace, fmt.Sprintf("нитей предложено к сопоставлению: %d", len(open)))
+	}
+
+	// Окружение подаётся до всего остального и на каждом ходу.
+	//
+	// Это ответ на вопрос «что, теперь на каждый вопрос писать умение?».
+	// Нет: дешёвые факты о машине, не требующие цели, наблюдает сам runtime
+	// и кладёт сюда. Модель не просит их, не ждёт их и не выдумывает —
+	// она их просто знает, как знает текущее время.
+	if s.skills != nil {
+		if facts := s.skills.Ambient(ctx); len(facts) > 0 {
+			var b strings.Builder
+			for _, f := range facts {
+				b.WriteString("- " + f.Text + "\n")
+			}
+			sections = append(sections, ContextSection{
+				Title: "Что ты видишь прямо сейчас", Body: b.String(),
+			})
+			trace = append(trace, fmt.Sprintf("окружение: %d наблюдений", len(facts)))
+		}
 	}
 
 	// Собственные умения показываются наравне с нитями и по той же причине:

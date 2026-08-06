@@ -122,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/settings/workspace-roots", s.addWorkspaceRoot)
 	mux.HandleFunc("DELETE /api/v1/settings/workspace-roots", s.removeWorkspaceRoot)
 	mux.HandleFunc("POST /api/v1/workers/{id}/enabled", s.setWorkerEnabled)
+	mux.HandleFunc("POST /api/v1/settings/model-policy", s.setModelPolicy)
 
 	mux.Handle("/", s.ui())
 
@@ -1051,14 +1052,47 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 			"models_dir": s.app.Config.ModelsDir,
 		},
 		"workspace_roots": s.app.Policy.Roots(),
-		"model_policy":    s.app.Config.ModelPolicy.Describe(),
+		"model_policy":    s.app.Delegation.ModelPolicy().Describe(),
+		"model_policies":  app.ModelPolicyChoices(),
 		"memory_policy":   s.app.Memory.Policy().Describe(),
 		// Часть настроек применяется только при запуске. Молчать об этом
 		// значило бы дать владельцу поменять то, что не поменяется.
 		"restart_required": []string{
-			"адрес прослушивания", "порт локальной модели",
-			"политика стоимости", "режим памяти",
+			"адрес прослушивания", "порт локальной модели", "режим памяти",
 		},
+	})
+}
+
+// setModelPolicy меняет допустимую стоимость моделей.
+//
+// Решение владельца о собственных деньгах должно действовать сразу и быть
+// записанным: политика уходит и в работающую службу, и в файл настроек.
+func (s *Server) setModelPolicy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	p, err := worker.ParseModelPolicy(body.Name)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "политика не принята", err.Error())
+		return
+	}
+	s.app.Delegation.SetModelPolicy(p)
+
+	name := strings.ToLower(strings.TrimSpace(body.Name))
+	if _, err := s.app.Settings.Update(func(cur app.Settings) app.Settings {
+		cur.ModelPolicy = name
+		return cur
+	}); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "настройка не сохранена", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model_policy": p.Describe(),
+		"note": "действует сразу; уже созданные поручения сохраняют выбранную " +
+			"им модель — подтверждали именно её",
 	})
 }
 

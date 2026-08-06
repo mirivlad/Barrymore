@@ -55,6 +55,17 @@ type Watcher interface {
 // Watch подключает наблюдателя за исходами поручений.
 func (s *Service) Watch(w Watcher) { s.watcher = w }
 
+// ModelPolicy возвращает действующую политику стоимости.
+func (s *Service) ModelPolicy() worker.ModelPolicy { return s.modelPolicy }
+
+// SetModelPolicy меняет политику стоимости на ходу.
+//
+// Сразу, а не с перезапуском: «разреши платные на сегодня» — решение,
+// ради которого владельцу незачем останавливать систему. На уже созданные
+// поручения это не влияет: модель у них выбрана и записана, и менять её
+// задним числом значило бы подтверждать одно, а запускать другое.
+func (s *Service) SetModelPolicy(p worker.ModelPolicy) { s.modelPolicy = p }
+
 // Config — параметры сервиса.
 type Config struct {
 	DB          *store.DB

@@ -10,10 +10,15 @@ import (
 	"github.com/mirivlad/barrymore/internal/skill"
 )
 
-// stubCatalog отдаёт заранее известный набор умений.
-type stubCatalog struct{ items []skill.Skill }
+// stubCatalog отдаёт заранее известный набор умений и окружения.
+type stubCatalog struct {
+	items   []skill.Skill
+	ambient []skill.Fact
+}
 
 func (c stubCatalog) Live() []skill.Skill { return c.items }
+
+func (c stubCatalog) Ambient(context.Context) []skill.Fact { return c.ambient }
 
 func ownAction(id, target, why string) map[string]any {
 	return map[string]any{"own_actions": []any{map[string]any{
@@ -21,11 +26,14 @@ func ownAction(id, target, why string) map[string]any {
 	}}}
 }
 
-var catalog = stubCatalog{items: []skill.Skill{{
-	ID: "git.worktree.diagnose", Title: "разобраться с рабочими копиями",
-	Question: "что происходит с worktree", NeedsTarget: true,
-	Origin: skill.OriginBuiltin, Enabled: true,
-}}}
+var catalog = stubCatalog{
+	items: []skill.Skill{{
+		ID: "git.worktree.diagnose", Title: "разобраться с рабочими копиями",
+		Question: "что происходит с worktree", NeedsTarget: true,
+		Origin: skill.OriginBuiltin, Enabled: true,
+	}},
+	ambient: []skill.Fact{{Text: "место на дисках: / 33.0 ГБ свободно из 218.8 ГБ (15%)"}},
+}
 
 // Умение, которое Бэрримор показал сам, применимо: разговор доводит его
 // до владельца одним предложением, а не превращает в поручение.
@@ -157,12 +165,38 @@ func TestModelIsForbiddenToInventFactsAboutTheMachine(t *testing.T) {
 	}
 	system := h.prov.lastReq.System
 	for _, must := range []string{
-		"не называешь ни одной цифры",
-		"Выдуманное число хуже отказа",
+		"Выдуманное число хуже",
 		"сказанное без проверки",
+		"не смотрел, не знаю",
 	} {
 		if !strings.Contains(system, must) {
 			t.Fatalf("модели не сказано главное: нет фразы %q", must)
 		}
+	}
+}
+
+// Дешёвый факт о машине не требует умения: он уже в контексте.
+//
+// Это и есть ответ на «что, на каждый вопрос писать умение?». Класс таких
+// фактов закрыт — всё, что не требует цели и стоит миллисекунды, — и потому
+// закрыт список того, что здесь надо предусмотреть.
+func TestAmbientFactsReachTheModelWithoutAnySkill(t *testing.T) {
+	ctx := context.Background()
+	h := newHarnessWithSkills(t, memory.DefaultPolicy(), catalog)
+	h.prov.reply = reply("Понял.", nil)
+
+	c := h.conversation(t, "")
+	if _, err := h.talk.Send(ctx, c.ID, "сколько свободного места?"); err != nil {
+		t.Fatal(err)
+	}
+	system := h.prov.lastReq.System
+	if !strings.Contains(system, "Что ты видишь прямо сейчас") {
+		t.Fatal("окружение не подано модели: отвечать ей будет нечем, кроме выдумки")
+	}
+	if !strings.Contains(system, "218.8 ГБ") {
+		t.Fatal("наблюдение о диске не дошло до модели")
+	}
+	if !strings.Contains(system, "Текущее время") {
+		t.Fatal("время не подано: дату модель тоже сочинит")
 	}
 }

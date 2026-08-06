@@ -120,12 +120,20 @@ const server = http.createServer((req, res) => {
       } catch {
         // Неразбираемый запрос — не повод молчать: отдаём общий ответ.
       }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({
-        model: "e2e",
-        choices: [{ message: { role: "assistant", content: JSON.stringify(replyFor(prompt)) } }],
-        usage: { prompt_tokens: 10, completion_tokens: 20 },
-      }));
+      // Медленный ответ нужен ровно одной проверке: что владелец, ушедший
+      // на другую вкладку, возвращается к своему вопросу и секундомеру,
+      // а не к пустому экрану.
+      const slow = /не спеши/i.test(prompt || "");
+      const answer = () => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          model: "e2e",
+          choices: [{ message: { role: "assistant", content: JSON.stringify(replyFor(prompt)) } }],
+          usage: { prompt_tokens: 10, completion_tokens: 20 },
+        }));
+      };
+      if (slow) setTimeout(answer, 4000);
+      else answer();
     });
     return;
   }
