@@ -7,12 +7,16 @@ import (
 )
 
 // WorkerProxyEnv is deliberately Barrymore-specific. barrymored may carry
-// this marker in its own environment, but only runner translates it into
-// standard HTTP proxy variables for an external worker process.
+// this marker in its own environment, but only runner turns it into a network
+// route for an external worker process.
 //
-// This keeps the owner's worker route from becoming a network policy for
-// Barrymore itself or for the local llama-server it supervises.
+// The worker never receives the real proxy endpoint in HTTP_PROXY. With a
+// configured proxy it sees only a loopback bridge inside its private network
+// namespace; the host-side relay is the only process allowed to reach the real
+// endpoint (ADR 0023).
 const WorkerProxyEnv = "BARRYMORE_WORKER_PROXY"
+
+const workerProxyBridgeAddr = "127.0.0.1:17717"
 
 // NormalizeWorkerProxy validates and canonicalizes the proxy URL used by
 // external workers. Empty means that workers use their normal network route.
@@ -54,14 +58,43 @@ func NormalizeWorkerProxy(raw string) (string, error) {
 	return strings.TrimSuffix(u.String(), "/"), nil
 }
 
-// workerProxyEnvironment turns Barrymore's private setting into the variables
-// understood by most networked CLI tools. Validation happens at startup; the
-// runner still fails closed here and returns no proxy on an impossible value.
-func workerProxyEnvironment(raw string) []string {
+// localWorkerProxyURL is what a worker sees inside its network namespace.
+//
+// The real upstream endpoint stays on the host side. For an HTTPS proxy the
+// host relay performs TLS itself, so the worker speaks ordinary HTTP proxy
+// protocol to loopback. For SOCKS we deliberately advertise socks5h: target
+// DNS then goes to the upstream SOCKS server instead of leaking from the
+// isolated worker namespace.
+func localWorkerProxyURL(raw string) string {
 	proxy, err := NormalizeWorkerProxy(raw)
 	if err != nil || proxy == "" {
+		return ""
+	}
+	u, err := url.Parse(proxy)
+	if err != nil {
+		return ""
+	}
+	scheme := u.Scheme
+	switch scheme {
+	case "https":
+		scheme = "http"
+	case "socks5", "socks5h":
+		scheme = "socks5h"
+	}
+	return scheme + "://" + workerProxyBridgeAddr
+}
+
+// workerProxyEnvironment exposes only the loopback bridge to a worker.
+// Validation happens at startup; an impossible value nevertheless fails
+// closed here by returning no route rather than the real endpoint.
+func workerProxyEnvironment(raw string) []string {
+	proxy := localWorkerProxyURL(raw)
+	if proxy == "" {
 		return nil
 	}
+	// localhost itself may bypass the proxy. That does not open the host: the
+	// worker lives in a private network namespace whose loopback contains only
+	// Barrymore's bridge.
 	noProxy := "localhost,127.0.0.1,::1"
 	return []string{
 		"HTTP_PROXY=" + proxy,
@@ -76,7 +109,7 @@ func workerProxyEnvironment(raw string) []string {
 }
 
 // mergeEnv combines environment fragments with last-writer-wins semantics
-// while preserving a deterministic order. This makes the owner's worker proxy
+// while preserving a deterministic order. This makes Barrymore's route
 // authoritative over a proxy accidentally supplied by an adapter.
 func mergeEnv(chunks ...[]string) []string {
 	order := []string{}
