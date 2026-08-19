@@ -74,6 +74,17 @@ func (s *Server) setWorkerProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Generation меняется до обхода активных поручений. Это закрывает узкое
+	// окно, когда worker уже начал старт, но ещё не попал в SQL-проекцию:
+	// старый guard завершит его, а новый buildCommand во время переключения
+	// получит ErrNetworkPolicyChanging.
+	endChange, err := runner.BeginWorkerNetworkPolicyChange()
+	if err != nil {
+		writeProblem(w, http.StatusConflict, "прокси не переключён", err.Error())
+		return
+	}
+	defer endChange()
+
 	stopped, err := s.app.Delegation.StopForNetworkPolicyChange(
 		r.Context(), "изменена сетевая политика персонала")
 	if err != nil {
