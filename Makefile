@@ -8,10 +8,12 @@ DATA_ROOT ?= $(CURDIR)/data/runtime
 WORKSPACE_ROOTS ?= $(HOME)/git
 ADDR ?= 127.0.0.1:7717
 
-# Локальная модель. Параметры подтверждены спайком S1 на этом хосте:
-# эксперты MoE на CPU, остальные слои на видеокарту — 94/18 токенов в секунду.
-LOCAL_MODEL ?= $(CURDIR)/data/local_models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
-MODEL_FLAGS ?= -local-model-threads 14 -local-model-gpu-layers 99 -local-model-cpu-moe 40
+# Локальная модель для живого dev-прогона. Это не продуктовая зависимость:
+# модель остаётся сменяемой через настройки. Сейчас пробуем компактную Ornith
+# вместо прежней 35B MoE-модели, чтобы постоянно живущий дворецкий не требовал
+# тяжёлого resident inference для обычного разговора и диспетчеризации.
+LOCAL_MODEL ?= $(CURDIR)/data/local_models/Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf
+MODEL_FLAGS ?= -local-model-threads 14 -local-model-gpu-layers 99
 
 .PHONY: help build test test-race vet fmt lint run run-quiet dev install uninstall \
         clean host-audit rebuild ci e2e
@@ -71,7 +73,6 @@ install: build ## Поставить бинарник и пользовател�
 uninstall: ## Убрать службу и бинарник; данные остаются на месте
 	-@systemctl --user disable --now barrymore 2>/dev/null
 	-@rm -f $(HOME)/.config/systemd/user/barrymore.service
-	-@rm -f $(HOME)/.local/bin/barrymored
 	-@systemctl --user daemon-reload
 	@echo "Убрано. Данные и настройки не тронуты."
 
