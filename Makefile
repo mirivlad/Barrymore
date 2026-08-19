@@ -16,7 +16,11 @@ LOCAL_MODEL ?= $(CURDIR)/data/local_models/Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf
 # Первый bring-up на 8 ГБ VRAM намеренно начинается с 8K контекста: сначала
 # проверяем поведение и скорость, затем поднимаем окно по фактической памяти.
 # История Barrymore хранится runtime'ом, а не обязана целиком жить в KV-cache.
-MODEL_FLAGS ?= -local-model-context 8192 -local-model-threads 14 -local-model-gpu-layers 99
+# Значения заданы явно, включая нули: старый settings.json от 35B MoE-модели
+# не должен незаметно вернуть cpu_moe или внешний provider в тест Ornith.
+MODEL_FLAGS ?= -local-model-context 8192 -local-model-threads 14 \
+	-local-model-gpu-layers 99 -local-model-cpu-moe 0 -local-model-port 18080 \
+	-llama-server= -provider= -provider-model=local -provider-label=Ornith
 
 .PHONY: help build test test-race vet fmt lint run run-quiet dev install uninstall \
         clean host-audit rebuild ci e2e ornith-ready
@@ -54,6 +58,7 @@ ornith-ready: ## Проверить окружение первого живог
 		echo "Не найден файл модели:"; \
 		echo "  $(LOCAL_MODEL)"; \
 		echo "Ожидается Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf в data/local_models/"; \
+		echo "Если установлен hf: hf download AtomicChat/Ornith-1.5-9B-GGUF Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf --local-dir data/local_models"; \
 		exit 1; \
 	}
 	@printf "модель: "; ls -lh "$(LOCAL_MODEL)" | awk '{print $$5, $$9}'
