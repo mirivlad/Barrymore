@@ -25,6 +25,9 @@ type Settings struct {
 	MemoryPolicy   string   `json:"memory_policy,omitempty"`
 	// Initiative — когда Бэрримор обращается первым: on, urgent-only, off.
 	Initiative string `json:"initiative,omitempty"`
+	// WorkerProxy — сетевой маршрут только для внешнего персонала. Он не
+	// превращается в HTTP_PROXY самого Бэрримора или локальной модели.
+	WorkerProxy string `json:"worker_proxy,omitempty"`
 
 	// LocalModel — какую локальную модель поднимать.
 	LocalModel LocalModelSettings `json:"local_model"`
