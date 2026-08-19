@@ -164,6 +164,9 @@ func (r *Runner) Start(ctx context.Context, req StartRequest) (StartResult, erro
 	cmd.Stderr = stderr
 	cmd.Stdin = strings.NewReader(req.Plan.Stdin)
 	// Минимальное окружение: наследуется только необходимое, остальное задаёт adapter.
+	// Настроенный владельцем прокси добавляется здесь, на самой границе запуска
+	// персонала. Сам barrymored и локальный llama-server стандартных proxy
+	// variables из этой настройки не получают (ADR 0023).
 	cmd.Env = minimalEnv(req.Plan.Env)
 	// Отдельная группа процессов позволяет остановить всё дерево одним сигналом.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -524,15 +527,18 @@ func (r *Runner) Shutdown() {
 //
 // Наследуется только то, без чего не работают базовые вещи. Переменные с
 // секретами не пробрасываются: исполнитель пользуется собственной учётной записью.
+// Прокси — исключение только в смысле транспорта: barrymored хранит его в
+// BARRYMORE_WORKER_PROXY, а стандартные proxy variables появляются лишь здесь,
+// в окружении внешнего работника (ADR 0023).
 func minimalEnv(extra []string) []string {
 	keep := []string{"PATH", "HOME", "LANG", "LC_ALL", "TZ", "XDG_RUNTIME_DIR", "USER", "LOGNAME"}
-	env := make([]string, 0, len(keep)+len(extra))
+	env := make([]string, 0, len(keep)+len(extra)+8)
 	for _, k := range keep {
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
 		}
 	}
-	return append(env, extra...)
+	return mergeEnv(env, extra, workerProxyEnvironment(os.Getenv(WorkerProxyEnv)))
 }
 
 func sanitizeUnit(s string) string {
