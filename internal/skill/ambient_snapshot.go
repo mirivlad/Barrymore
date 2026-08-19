@@ -30,8 +30,8 @@ type AmbientSnapshot struct {
 // AmbientDisk — наблюдаемое свободное место на реальной точке монтирования.
 type AmbientDisk struct {
 	Mount string `json:"mount"`
-	Free  uint64 `json:"free"`
-	Total uint64 `json:"total"`
+	Free  int64  `json:"free"`
+	Total int64  `json:"total"`
 }
 
 // SnapshotAmbient читает текущее состояние машины без побочных действий.
