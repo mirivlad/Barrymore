@@ -40,7 +40,9 @@ jobs:
         run: go build -o bin/barrymored ./cmd/barrymored
 
       - name: Разбор интерфейса
-        run: node --check internal/api/web/app.js
+        run: |
+          node --check internal/api/web/app.js
+          node --check internal/api/web/proxy.js
 
       # Браузерная проверка проходит и без исполнителей на машине: часть про
       # поручение честно пропускается, а не считается пройденной молча.
