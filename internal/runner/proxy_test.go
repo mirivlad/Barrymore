@@ -1,9 +1,14 @@
 package runner
 
 import (
+	"errors"
+	"io"
+	"net"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/mirivlad/barrymore/internal/worker"
 )
 
 func TestNormalizeWorkerProxy(t *testing.T) {
@@ -107,5 +112,98 @@ func TestMergeEnvOwnerProxyWins(t *testing.T) {
 	}
 	if !slices.Contains(got, "PATH=/usr/bin") || !slices.Contains(got, "FOO=bar") {
 		t.Fatalf("non-proxy environment was lost: %#v", got)
+	}
+}
+
+func TestHostRelayForwardsOnlyToConfiguredProxy(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = upstream.Close() })
+
+	go func() {
+		for {
+			c, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}()
+		}
+	}()
+
+	socketPath, err := ensureWorkerProxyRelay("http://" + upstream.Addr().String())
+	if err != nil {
+		t.Fatalf("relay не поднялся: %v", err)
+	}
+	c, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("unix relay недоступен: %v", err)
+	}
+	defer c.Close()
+
+	if _, err := c.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(c, buf); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "ping" {
+		t.Fatalf("relay исказил поток: %q", string(buf))
+	}
+}
+
+func TestProxyOnlyRefusesWithoutBubblewrap(t *testing.T) {
+	t.Setenv(WorkerProxyEnv, "http://127.0.0.1:9")
+	plan := worker.RunPlan{
+		Argv:    []string{"/bin/true"},
+		Sandbox: worker.Sandbox{Network: true},
+	}
+	_, profile, err := buildCommand(Capabilities{}, plan, commandOptions{})
+	if !errors.Is(err, ErrNoProxyIsolation) {
+		t.Fatalf("без bwrap получили %v, ожидался ErrNoProxyIsolation", err)
+	}
+	if !profile.ProxyOnly || profile.Network {
+		t.Fatalf("неверный профиль при отказе: %+v", profile)
+	}
+}
+
+func TestProxyOnlyCommandUnsharesNetworkAndUsesBridge(t *testing.T) {
+	upstream, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = upstream.Close() })
+	go func() {
+		for {
+			c, err := upstream.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close() // preflight is enough for this test
+		}
+	}()
+
+	t.Setenv(WorkerProxyEnv, "http://"+upstream.Addr().String())
+	plan := worker.RunPlan{
+		Argv:    []string{"/bin/true"},
+		Sandbox: worker.Sandbox{Network: true},
+	}
+	argv, profile, err := buildCommand(Capabilities{Bwrap: "/usr/bin/bwrap"}, plan, commandOptions{})
+	if err != nil {
+		t.Fatalf("proxy-only command не собрана: %v", err)
+	}
+	if !slices.Contains(argv, "--unshare-net") {
+		t.Fatalf("в proxy-only argv нет --unshare-net: %#v", argv)
+	}
+	if !slices.Contains(argv, internalWorkerProxyBridgeMode) {
+		t.Fatalf("в proxy-only argv нет встроенного bridge: %#v", argv)
+	}
+	if !profile.ProxyOnly || profile.Network {
+		t.Fatalf("неверный proxy-only профиль: %+v", profile)
 	}
 }
