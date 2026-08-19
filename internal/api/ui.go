@@ -53,7 +53,10 @@ func (s *Server) ui() http.Handler {
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(base)
-			_, _ = w.Write([]byte("\nimport \"/proxy.js\";\n"))
+			// Static imports are evaluated before the body of app.js. surface.js
+			// therefore installs its hydration guard before loadTalk can restore
+			// the previous turn and accidentally open the Desk on entry.
+			_, _ = w.Write([]byte("\nimport \"/surface.js\";\nimport \"/proxy.js\";\n"))
 			return
 		}
 
