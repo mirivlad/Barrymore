@@ -19,7 +19,7 @@ LOCAL_MODEL ?= $(CURDIR)/data/local_models/Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf
 MODEL_FLAGS ?= -local-model-context 8192 -local-model-threads 14 -local-model-gpu-layers 99
 
 .PHONY: help build test test-race vet fmt lint run run-quiet dev install uninstall \
-        clean host-audit rebuild ci e2e
+        clean host-audit rebuild ci e2e ornith-ready
 
 help: ## Показать список целей
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -49,7 +49,25 @@ e2e: build ## Проверить интерфейс настоящим брау�
 
 ci: lint test-race build ## Локальный CI
 
-run: build ## Запустить Бэрримора вместе с локальной моделью
+ornith-ready: ## Проверить окружение первого живого запуска Ornith
+	@test -f "$(LOCAL_MODEL)" || { \
+		echo "Не найден файл модели:"; \
+		echo "  $(LOCAL_MODEL)"; \
+		echo "Ожидается Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf в data/local_models/"; \
+		exit 1; \
+	}
+	@printf "модель: "; ls -lh "$(LOCAL_MODEL)" | awk '{print $$5, $$9}'
+	@printf "llama-server: "; \
+		if test -x third_party/llama.cpp/build/bin/llama-server; then \
+			echo third_party/llama.cpp/build/bin/llama-server; \
+		elif command -v llama-server >/dev/null 2>&1; then \
+			command -v llama-server; \
+		else \
+			echo "не найден (Barrymore также проверит ~/.local/bin и ~/llama.cpp/build/bin)"; \
+		fi
+	@printf "bubblewrap: "; command -v bwrap 2>/dev/null || echo "не найден — сам Barrymore работает, proxy-only персонал запускаться не будет"
+
+run: build ornith-ready ## Запустить Бэрримора вместе с локальной Ornith
 	$(BIN) -addr $(ADDR) -data-root $(DATA_ROOT) -workspace-roots $(WORKSPACE_ROOTS) \
 		-local-model $(LOCAL_MODEL) $(MODEL_FLAGS)
 
