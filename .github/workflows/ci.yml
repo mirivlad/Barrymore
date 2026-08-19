@@ -43,6 +43,7 @@ jobs:
         run: |
           node --check internal/api/web/app.js
           node --check internal/api/web/surface.js
+          node --check internal/api/web/desk.js
           node --check internal/api/web/proxy.js
 
       # Браузерная проверка проходит и без исполнителей на машине: часть про
