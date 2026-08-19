@@ -15,16 +15,16 @@ import (
 // прямо из тех же Linux-источников (/proc и statfs), что и Ambient. Модель к
 // построению карточки отношения не имеет.
 type AmbientSnapshot struct {
-	ObservedAt      time.Time      `json:"observed_at"`
-	Hostname        string         `json:"hostname,omitempty"`
-	UptimeSeconds   float64        `json:"uptime_seconds,omitempty"`
-	CPUs            int            `json:"cpus"`
-	Load1           float64        `json:"load_1,omitempty"`
-	Load5           float64        `json:"load_5,omitempty"`
-	Load15          float64        `json:"load_15,omitempty"`
-	MemoryTotal     int64          `json:"memory_total,omitempty"`
-	MemoryAvailable int64          `json:"memory_available,omitempty"`
-	Disks           []AmbientDisk  `json:"disks,omitempty"`
+	ObservedAt      time.Time     `json:"observed_at"`
+	Hostname        string        `json:"hostname,omitempty"`
+	UptimeSeconds   float64       `json:"uptime_seconds,omitempty"`
+	CPUs            int           `json:"cpus"`
+	Load1           float64       `json:"load_1,omitempty"`
+	Load5           float64       `json:"load_5,omitempty"`
+	Load15          float64       `json:"load_15,omitempty"`
+	MemoryTotal     int64         `json:"memory_total,omitempty"`
+	MemoryAvailable int64         `json:"memory_available,omitempty"`
+	Disks           []AmbientDisk `json:"disks,omitempty"`
 }
 
 // AmbientDisk — наблюдаемое свободное место на реальной точке монтирования.
