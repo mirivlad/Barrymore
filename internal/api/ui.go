@@ -10,13 +10,11 @@ import (
 var webFS embed.FS
 
 // ui отдаёт интерфейс оператора и маленькие маршруты, принадлежащие именно
-// живой поверхности настроек.
+// живой продуктовой поверхности.
 //
-// Основной versioned API по-прежнему регистрируется в Handler. Proxy-setting
-// перехватывается здесь, потому что этот срез должен применяться без
-// перезапуска и одновременно обслуживает форму в embedded UI. После
-// укрупнения settings API маршрут можно без изменения контракта перенести в
-// общий список Handler.
+// Основной versioned API по-прежнему регистрируется в Handler. Небольшие
+// front-desk endpoints живут здесь, чтобы этот срез можно было развивать без
+// раздувания старого монолитного api.go; контракт URL от этого не меняется.
 func (s *Server) ui() http.Handler {
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
@@ -40,6 +38,17 @@ func (s *Server) ui() http.Handler {
 			return
 		}
 
+		if r.URL.Path == "/api/v1/desk/ambient" {
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", http.MethodGet)
+				writeProblem(w, http.StatusMethodNotAllowed, "метод не поддерживается",
+					"Стол только читает наблюдаемое состояние машины")
+				return
+			}
+			s.deskAmbient(w, r)
+			return
+		}
+
 		// Основной app.js большой и давно проверяется E2E. Новые независимые
 		// поверхности подключаются маленькими ES-модулями, чтобы изменение одной
 		// настройки не требовало переписывать монолитный файл и не увеличивало
@@ -56,7 +65,8 @@ func (s *Server) ui() http.Handler {
 			// Static imports are evaluated before the body of app.js. surface.js
 			// therefore installs its hydration guard before loadTalk can restore
 			// the previous turn and accidentally open the Desk on entry.
-			_, _ = w.Write([]byte("\nimport \"/surface.js\";\nimport \"/proxy.js\";\n"))
+			_, _ = w.Write([]byte(
+				"\nimport \"/surface.js\";\nimport \"/desk.js\";\nimport \"/proxy.js\";\n"))
 			return
 		}
 
