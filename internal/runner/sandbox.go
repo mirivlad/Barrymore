@@ -50,8 +50,11 @@ type SandboxProfile struct {
 	// Supervision — systemd-scope либо process-group.
 	Supervision string   `json:"supervision"`
 	ReadOnlyFS  bool     `json:"read_only_fs"`
-	Network     bool     `json:"network"`
-	Writable    []string `json:"writable"`
+	// Network означает обычный прямой network namespace хоста. При ProxyOnly
+	// он всегда false: worker видит только loopback в собственной netns.
+	Network   bool `json:"network"`
+	ProxyOnly bool `json:"proxy_only,omitempty"`
+	Writable  []string `json:"writable"`
 	// Warnings перечисляет ослабления, о которых обязан знать владелец.
 	Warnings []string `json:"warnings,omitempty"`
 }
@@ -61,17 +64,41 @@ var ErrNoIsolation = fmt.Errorf(
 	"audit-only запуск невозможен: bubblewrap недоступен, " +
 		"а полагаться на добросовестность исполнителя нельзя (ADR 0007)")
 
+// ErrNoProxyIsolation возвращается, когда владелец потребовал proxy-only, но
+// kernel boundary построить нечем. В таком режиме прямой запуск запрещён.
+var ErrNoProxyIsolation = fmt.Errorf(
+	"запуск через обязательный прокси невозможен: bubblewrap недоступен; " +
+		"без отдельного network namespace нельзя гарантировать отсутствие прямого выхода")
+
 // buildCommand оборачивает план запуска в изоляцию и супервизию.
 //
-// Порядок обёрток: systemd-run --scope → bwrap → сам исполнитель.
-// Внешняя обёртка даёт устойчивую идентичность процесса, внутренняя — границы.
+// Порядок обёрток: systemd-run --scope → bwrap → встроенный proxy bridge →
+// сам исполнитель. Внешняя обёртка даёт устойчивую идентичность процесса,
+// bwrap — границы, bridge — единственный сетевой путь наружу.
 func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) ([]string, SandboxProfile, error) {
+	proxyRaw := os.Getenv(WorkerProxyEnv)
+	proxyOnly := proxyRaw != "" && plan.Sandbox.Network
 	profile := SandboxProfile{
 		Isolation: "none", Supervision: "process-group",
-		Network: plan.Sandbox.Network,
+		Network: plan.Sandbox.Network && !proxyOnly,
+		ProxyOnly: proxyOnly,
 	}
 
 	inner := append([]string(nil), plan.Argv...)
+	if proxyOnly {
+		if caps.Bwrap == "" {
+			return nil, profile, ErrNoProxyIsolation
+		}
+		socketPath, err := ensureWorkerProxyRelay(proxyRaw)
+		if err != nil {
+			return nil, profile, err
+		}
+		self, err := os.Executable()
+		if err != nil {
+			return nil, profile, fmt.Errorf("runner: собственный бинарник для proxy bridge не найден: %w", err)
+		}
+		inner = append([]string{self, internalWorkerProxyBridgeMode, socketPath, "--"}, inner...)
+	}
 
 	// Кто владеет временем жизни запуска: systemd-scope или процесс Бэрримора.
 	//
@@ -94,6 +121,18 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 			"--tmpfs", "/tmp",
 			// Процесс не может перехватить управляющий терминал.
 			"--new-session",
+		}
+		if proxyOnly {
+			// Главное свойство proxy-only: в namespace нет маршрута к хосту или
+			// интернету вообще, только loopback. Даже worker, игнорирующий
+			// HTTP_PROXY, физически не сможет сделать прямой TCP/UDP connect.
+			bw = append(bw,
+				"--unshare-net",
+				// Host runtime sockets (DBus, ssh-agent, docker и подобные) могли
+				// бы стать неожиданным обходным каналом к хостовым сервисам.
+				"--tmpfs", "/run",
+				"--tmpfs", "/var/tmp",
+			)
 		}
 		if !ownedByScope {
 			// Умирает вместе с Бэрримором: иначе за песочницей некому следить.
@@ -130,7 +169,7 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 			}
 		}
 
-		if !plan.Sandbox.Network {
+		if !plan.Sandbox.Network && !proxyOnly {
 			bw = append(bw, "--unshare-net")
 		}
 		bw = append(bw, "--")
@@ -140,6 +179,8 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 		profile.ReadOnlyFS = true
 	} else if opts.AuditOnly {
 		return nil, profile, ErrNoIsolation
+	} else if proxyOnly {
+		return nil, profile, ErrNoProxyIsolation
 	} else {
 		profile.Warnings = append(profile.Warnings,
 			"bubblewrap недоступен: файловая система не ограничена изоляцией")
