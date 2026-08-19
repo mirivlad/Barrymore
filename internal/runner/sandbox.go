@@ -120,7 +120,7 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 	proxyOnly := proxyRaw != "" && plan.Sandbox.Network
 	profile := SandboxProfile{
 		Isolation: "none", Supervision: "process-group",
-		Network: plan.Sandbox.Network && !proxyOnly,
+		Network:   plan.Sandbox.Network && !proxyOnly,
 		ProxyOnly: proxyOnly,
 	}
 
