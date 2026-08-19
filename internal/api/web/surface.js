@@ -14,9 +14,16 @@ if (desk && toggle) {
 
   function keepClosed() {
     if (!restoring) return;
-    desk.hidden = true;
-    document.body.classList.remove("affairs-open");
-    toggle.setAttribute("aria-expanded", "false");
+    // MutationObserver наблюдает ровно эти атрибуты. Повторно записывать уже
+    // установленное значение нельзя: браузер всё равно создаст mutation record
+    // и получится бесконечная микрозадачная петля после reload.
+    if (!desk.hidden) desk.hidden = true;
+    if (document.body.classList.contains("affairs-open")) {
+      document.body.classList.remove("affairs-open");
+    }
+    if (toggle.getAttribute("aria-expanded") !== "false") {
+      toggle.setAttribute("aria-expanded", "false");
+    }
   }
 
   keepClosed();
