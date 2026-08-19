@@ -110,9 +110,9 @@
   td, th { text-align: left; padding: 5px 8px 5px 0; vertical-align: top; }
   th { color: var(--muted); font-weight: 500; }
 
-  /* Техническая глубина доступна по раскрытию, но не засоряет обычный разговор
-     (07_USER_EXPERIENCE §1). Она не удаляется из разметки, а скрывается:
-     переключатель должен показывать её мгновенно, без перезагрузки данных. */
+  /* Техническая глубина доступна по раскрытию, но не засоряет обычный разговор.
+     В обычном режиме владелец видит продукт, а не визуализатор доменной модели:
+     нити, штат, поручения и runtime-инспекторы становятся видимыми только здесь. */
   body:not(.tech) .tech-only { display: none; }
   .switch {
     display: inline-flex; align-items: center; gap: 6px;
@@ -146,10 +146,9 @@
   .welcome ol { margin: 8px 0 0; padding-left: 20px; }
   .welcome li { margin-bottom: 4px; }
 
-  /* Приёмная. Главный элемент экрана — разговор, и это выражено размером:
-     он занимает высоту окна целиком, а всё остальное живёт сбоку.
-     Прежняя вёрстка складывала карточки в вертикальную стопку, из-за чего
-     собеседник оказывался где-то посередине операторского дашборда. */
+  /* Главный элемент экрана — разговор. Второе пространство — Стол: Бэрримор
+     кладёт туда то, что полезно показать или требует решения. Пока Стол
+     использует прежний поток «дел» как первый вертикальный срез. */
   .reception {
     display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px;
     align-items: start;
@@ -163,11 +162,11 @@
   .talk > .chat { flex: 1 1 auto; min-height: 0; }
   .talk-top { display: flex; align-items: center; gap: 10px; min-height: 30px; }
   .talk-top button { white-space: nowrap; }
-  /* Распорка не должна отбирать место у строки нити: имя дела важнее пустоты. */
   .talk-top .grow { flex: 1 1 10px; }
 
-  /* Нить обозначена строкой, а не карточкой: она задаёт, о чём разговор,
-     и не должна соперничать с самим разговором. Полное состояние — по нажатию. */
+  /* Имя нити — диагностическая подробность. В обычном режиме Бэрримор сам
+     удерживает непрерывность и не заставляет владельца выбирать внутреннюю
+     сущность перед разговором. */
   .thread-line {
     background: none; border: none; font: inherit; color: var(--muted);
     padding: 0; cursor: pointer; text-align: left; min-width: 0; flex: 0 1 auto;
@@ -187,7 +186,6 @@
   }
   .composer textarea:focus { outline: none; }
 
-  /* Кнопка со счётчиком — единственное, что видно от сайдбара в закрытом виде. */
   .affairs-toggle {
     background: var(--panel); border: 1px solid var(--line); color: var(--ink);
     border-radius: 999px; padding: 5px 8px 5px 14px; font: inherit; font-size: 13px;
@@ -230,10 +228,6 @@
   .affair-body { font-size: 13px; padding-bottom: 10px; }
   .affair-body .row { margin-top: 8px; }
 
-  /* Карточка внутри списка остаётся карточкой. Правило `ul.plain li` было
-     сильнее по специфичности и съедало у неё боковые поля, добавляя сверху
-     чужую линию: исполнители выпадали из общей сетки и раздел выглядел
-     сломанным. */
   ul.plain > li.card { padding: 14px 16px; border-top: none; }
   .worker-list { margin-top: 12px; }
   .worker-list li.card > .row:first-child { row-gap: 4px; }
@@ -242,8 +236,6 @@
   details > summary { cursor: pointer; }
   details[open] > summary { margin-bottom: 6px; }
 
-  /* На узком экране разговор — главное, поэтому ему отдаётся больше высоты,
-     а вкладки перестают занимать две строки шапки. */
   @media (max-width: 600px) {
     header { padding: 10px 14px; gap: 10px; }
     main { padding: 14px; }
@@ -259,32 +251,26 @@
 <header>
   <h1>Бэрримор</h1>
   <nav>
-    <button data-tab="talk" aria-current="true">Приёмная</button>
-    <button data-tab="threads">Нити</button>
-    <button data-tab="staff">Штат</button>
-    <button data-tab="orders">Поручения</button>
-    <button data-tab="memory">Память</button>
-    <button data-tab="state">Состояние</button>
+    <button data-tab="talk" aria-current="true">Разговор</button>
+    <button data-tab="threads" class="tech-only">Нити</button>
+    <button data-tab="staff" class="tech-only">Штат</button>
+    <button data-tab="orders" class="tech-only">Поручения</button>
+    <button data-tab="memory" class="tech-only">Память</button>
+    <button data-tab="state" class="tech-only">Состояние</button>
     <button data-tab="settings">Настройки</button>
     <button data-tab="journal" class="tech-only">Журнал</button>
   </nav>
   <span class="grow"></span>
   <button class="ghost" id="notice-badge" hidden></button>
   <span id="live" class="tag tech-only">связь: устанавливается…</span>
-  <!-- Значок связи виден всегда, только когда связь потеряна: исправное
-       состояние — служебная подробность, а вот молчащий поток владельцу
-       знать полезно, иначе экран тихо отстаёт от происходящего. -->
 </header>
 
 <main>
-  <!-- Приёмная. В центре — разговор и поле ввода, и больше ничего.
-       Всё, что случилось в доме, пока владелец разговаривал, лежит справа
-       и открывается по кнопке. -->
   <section id="tab-talk">
     <div class="reception">
       <div class="talk">
         <div class="talk-top">
-          <button class="thread-line" id="thread-line" hidden
+          <button class="thread-line tech-only" id="thread-line" hidden
                   aria-controls="affairs"></button>
           <span class="grow"></span>
           <button class="ghost" id="talk-history" style="padding:4px 11px;font-size:13px"
@@ -293,7 +279,7 @@
             Новый разговор</button>
           <button class="affairs-toggle" id="affairs-toggle"
                   aria-expanded="false" aria-controls="affairs">
-            Дела <span class="count" id="affairs-count">0</span>
+            Стол <span class="count" id="affairs-count">0</span>
           </button>
         </div>
         <div id="chat" class="chat"></div>
@@ -307,7 +293,7 @@
         <div class="muted" id="talk-status"></div>
       </div>
 
-      <aside class="affairs" id="affairs" hidden aria-label="Дела">
+      <aside class="affairs" id="affairs" hidden aria-label="Стол Бэрримора">
         <div id="affairs-detail"></div>
         <div id="affairs-groups"></div>
       </aside>
@@ -376,9 +362,9 @@
         <button class="ghost" id="th-toggle-new">Завести вручную</button>
       </div>
       <p class="muted" style="margin:8px 0 0">
-        Нити ведёт Бэрримор: он относит к ним разговоры и держит их состояние
-        в порядке. Здесь — обзор и правка. Нить может не иметь срока и измеримого
-        результата: идея, спор или сомнение — полноценные нити.
+        Нити — внутренняя модель непрерывности Бэрримора. В обычном режиме он
+        ведёт их сам; этот экран остаётся техническим инспектором для отладки,
+        восстановления и редких ручных исправлений.
       </p>
     </div>
     <div id="threads-groups"><p class="muted">загрузка…</p></div>
@@ -434,12 +420,10 @@
         Обнаружение опрашивает версии и не выполняет платных запросов.
         Состояние квоты локально не наблюдается и честно показывается как неизвестное.
       </p>
-      <!-- Исполнители лежат внутри той же карточки, что и заголовок раздела.
-           Списком наружу они выпадали из сетки: другая ширина, нет полей,
-           строки встык — раздел выглядел сломанным. -->
       <ul class="plain worker-list" id="workers">
         <li class="muted">нажмите «Обнаружить исполнителей»</li>
       </ul>
+    </div>
   </section>
 
   <section id="tab-orders" hidden>
@@ -452,7 +436,7 @@
       <summary>Поручить вручную</summary>
       <p class="muted" style="margin:8px 0 0">Обычно поручение предлагает сам
         Бэрримор — прямо в разговоре, с уже заполненными целью, причиной и
-        каталогом. Эта форма нужна, когда проще задать всё самому.</p>
+        каталогом. Эта форма нужна как технический аварийный путь.</p>
       <div class="row" style="margin-top:10px">
         <div class="grow"><label for="wo-thread">Нить</label>
           <select id="wo-thread"></select></div>
@@ -476,6 +460,11 @@
   <section id="tab-settings" hidden>
     <div class="card">
       <h2>Локальная модель</h2>
+      <p class="muted">Локальная модель — постоянный разговорный и координирующий
+        слой, а не самый сильный работник в доме. Для него обычно полезнее
+        небольшая быстрая модель, которая постоянно помещается в памяти и хорошо
+        соблюдает структурированный контракт; тяжёлую работу Бэрримор может
+        поручить персоналу.</p>
       <p class="muted" id="models-note">загрузка…</p>
       <ul class="plain" id="models-list"></ul>
     </div>
@@ -510,6 +499,14 @@
       </div>
     </div>
     <div class="card">
+      <h2>Сеть персонала</h2>
+      <p class="muted">Внешний персонал может работать через отдельный прокси.
+        Эта настройка не меняет сеть самого Бэрримора и локальной модели.
+        Сейчас её можно задать в <code>settings.json</code> полем
+        <code>worker_proxy</code> или флагом <code>-worker-proxy</code>;
+        управление отсюда будет добавлено отдельным безопасным API-срезом.</p>
+    </div>
+    <div class="card">
       <h2>Чем можно платить</h2>
       <p class="muted">Политика стоимости решает, какие модели достанутся
         исполнителям. Действует сразу; уже подтверждённые поручения сохраняют
@@ -524,9 +521,10 @@
     </div>
     <div class="card">
       <h2>Технический режим</h2>
-      <p class="muted">Показывает идентификаторы, виды событий, модель, задержки,
-        токены и внутренние состояния runtime. В обычном разговоре всё это
-        только мешает, поэтому переключатель живёт здесь, а не в шапке.</p>
+      <p class="muted">Показывает внутренние разделы «Нити», «Штат»,
+        «Поручения», «Память», состояние runtime и журнал, а также идентификаторы,
+        виды событий, модель, задержки, токены и внутренние состояния. В обычной
+        работе это кишки машины, а не интерфейс дворецкого.</p>
       <label class="switch" style="margin-top:8px">
         <input type="checkbox" id="tech-mode"> показывать техническую подоплёку
       </label>
@@ -548,6 +546,27 @@
   </section>
 </main>
 
+<script>
+  // После обновления старый localStorage мог помнить техническую вкладку.
+  // Не открываем владельцу «Нити» только потому, что он смотрел их вчера:
+  // обычный режим начинается с разговора. Технический режим сохраняет место.
+  if (localStorage.getItem("barrymore.tech") !== "1") {
+    const saved = localStorage.getItem("barrymore.tab");
+    if (saved && saved !== "talk" && saved !== "settings") {
+      localStorage.setItem("barrymore.tab", "talk");
+    }
+  }
+
+  // Если технический режим выключили прямо из внутренней вкладки, возвращаем
+  // владельца к разговору вместо экрана без видимой навигации назад.
+  document.getElementById("tech-mode")?.addEventListener("change", (event) => {
+    if (event.target.checked) return;
+    const current = document.querySelector('nav button[aria-current="true"]');
+    if (current && current.dataset.tab !== "talk" && current.dataset.tab !== "settings") {
+      document.querySelector('nav button[data-tab="talk"]')?.click();
+    }
+  });
+</script>
 <script type="module" src="/app.js"></script>
 </body>
 </html>
