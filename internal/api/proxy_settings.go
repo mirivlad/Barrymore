@@ -14,6 +14,21 @@ import (
 // и оставлять файл настроек в состоянии, не совпадающем с effective policy.
 var workerProxyChangeMu sync.Mutex
 
+// getWorkerProxy возвращает именно действующую политику, а не только значение
+// из settings.json. Это различие важно после запуска с -worker-proxy: флаг
+// сильнее файла, и интерфейс не имеет права показывать «выключено», когда
+// персонал фактически маршрутизируется через proxy.
+func (s *Server) getWorkerProxy(w http.ResponseWriter, r *http.Request) {
+	effective := os.Getenv(runner.WorkerProxyEnv)
+	saved := s.app.Settings.Get().WorkerProxy
+	writeJSON(w, http.StatusOK, map[string]any{
+		"worker_proxy": effective,
+		"saved_proxy":  saved,
+		"enabled":      effective != "",
+		"overridden":   effective != saved,
+	})
+}
+
 // setWorkerProxy меняет глобальный маршрут внешнего персонала немедленно.
 //
 // Семантика намеренно сильнее обычной настройки окружения: прежде чем новый
@@ -50,7 +65,9 @@ func (s *Server) setWorkerProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"worker_proxy": next,
+			"saved_proxy":  next,
 			"enabled":      next != "",
+			"overridden":   false,
 			"stopped_runs": 0,
 			"note":         "сетевая политика персонала уже действовала; настройка сохранена",
 		})
@@ -99,7 +116,9 @@ func (s *Server) setWorkerProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"worker_proxy": next,
+		"saved_proxy":  next,
 		"enabled":      next != "",
+		"overridden":   false,
 		"stopped_runs": stopped,
 		"note":         note,
 	})
