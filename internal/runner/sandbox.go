@@ -114,7 +114,9 @@ var ErrNoProxyIsolation = fmt.Errorf(
 //
 // Порядок обёрток: systemd-run --scope → bwrap → встроенный proxy bridge →
 // сам исполнитель. Внешняя обёртка даёт устойчивую идентичность процесса,
-// bwrap — границы, bridge — единственный сетевой путь наружу.
+// bwrap закрывает прямой IP-egress, bridge даёт единственный предусмотренный
+// Barrymore сетевой маршрут. Полная изоляция от произвольных file-backed
+// Unix-сокетов хоста этим слоем пока не заявляется (ADR 0023).
 func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) ([]string, SandboxProfile, error) {
 	proxyRaw := os.Getenv(WorkerProxyEnv)
 	proxyOnly := proxyRaw != "" && plan.Sandbox.Network
@@ -163,16 +165,24 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 			"--new-session",
 		}
 		if proxyOnly {
-			// Главное свойство proxy-only: в namespace нет маршрута к хосту или
-			// интернету вообще, только loopback. Даже worker, игнорирующий
+			// Главное свойство proxy-only: в namespace нет IP-маршрута к хосту
+			// или интернету, только loopback. Даже worker, игнорирующий
 			// HTTP_PROXY, физически не сможет сделать прямой TCP/UDP connect.
 			bw = append(bw,
 				"--unshare-net",
-				// Host runtime sockets (DBus, ssh-agent, docker и подобные) могли
-				// бы стать неожиданным обходным каналом к хостовым сервисам.
+				// Стандартные host runtime sockets (DBus, ssh-agent, Docker и
+				// подобные) не должны становиться случайным обходным каналом.
 				"--tmpfs", "/run",
 				"--tmpfs", "/var/tmp",
 			)
+			// Read-only bind корня не запрещает connect() к уже существующему
+			// файловому Unix socket. /run, /tmp и /var/tmp закрывают обычные
+			// runtime-точки, но нестандартный socket, лежащий, например, в
+			// домашнем каталоге, этим профилем пока не исключён. Не прячем
+			// ограничение за словом proxy-only: владелец должен видеть его.
+			profile.Warnings = append(profile.Warnings,
+				"proxy-only запрещает прямой IP-egress и скрывает стандартные runtime-сокеты; "+
+					"нестандартные файловые Unix-сокеты в доступном read-only дереве пока не изолированы")
 		}
 		if !ownedByScope {
 			// Умирает вместе с Бэрримором: иначе за песочницей некому следить.
