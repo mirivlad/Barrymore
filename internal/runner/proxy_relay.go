@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -39,7 +40,10 @@ type hostProxyRelay struct {
 
 var workerRelayState struct {
 	sync.Mutex
-	relay *hostProxyRelay
+	// relays are keyed by the normalized upstream URL. A running worker keeps
+	// the socket path it was started with, so changing Barrymore's configured
+	// proxy cannot silently reroute that worker to another upstream.
+	relays map[string]*hostProxyRelay
 }
 
 // ensureWorkerProxyRelay makes the host-side half of the fail-closed route
@@ -61,7 +65,10 @@ func ensureWorkerProxyRelay(raw string) (string, error) {
 	workerRelayState.Lock()
 	defer workerRelayState.Unlock()
 
-	if r := workerRelayState.relay; r != nil && r.upstream == proxy {
+	if workerRelayState.relays == nil {
+		workerRelayState.relays = map[string]*hostProxyRelay{}
+	}
+	if r := workerRelayState.relays[proxy]; r != nil {
 		return r.socket, nil
 	}
 
@@ -74,16 +81,14 @@ func ensureWorkerProxyRelay(raw string) (string, error) {
 	}
 	_ = conn.Close()
 
-	path, err := workerProxySocketPath()
+	path, err := workerProxySocketPath(proxy)
 	if err != nil {
 		return "", err
 	}
-	if old := workerRelayState.relay; old != nil {
-		_ = old.listener.Close()
-		_ = os.Remove(old.socket)
-		workerRelayState.relay = nil
-	}
-	_ = os.Remove(path) // stale socket after an unclean previous exit
+	// The path is deterministic for this exact upstream. After an unclean exit
+	// there may be a dead socket at the same path; removing it is safe because
+	// no relay from this process owns the path yet.
+	_ = os.Remove(path)
 
 	ln, err := net.Listen("unix", path)
 	if err != nil {
@@ -96,12 +101,12 @@ func ensureWorkerProxyRelay(raw string) (string, error) {
 	}
 
 	r := &hostProxyRelay{upstream: proxy, socket: path, listener: ln}
-	workerRelayState.relay = r
+	workerRelayState.relays[proxy] = r
 	go r.serve()
 	return path, nil
 }
 
-func workerProxySocketPath() (string, error) {
+func workerProxySocketPath(upstream string) (string, error) {
 	base, err := os.UserCacheDir()
 	if err != nil || strings.TrimSpace(base) == "" {
 		return "", fmt.Errorf("каталог relay прокси персонала не определён: %w", err)
@@ -115,7 +120,13 @@ func workerProxySocketPath() (string, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return "", fmt.Errorf("права каталога relay прокси персонала: %w", err)
 	}
-	return filepath.Join(dir, "worker-proxy.sock"), nil
+
+	// Do not put the proxy hostname (and later, potentially a secret reference)
+	// into the filesystem. The digest is only an opaque route identity. Eight
+	// bytes are ample here and keep the Unix socket path comfortably short.
+	sum := sha256.Sum256([]byte(upstream))
+	name := fmt.Sprintf("worker-proxy-%x.sock", sum[:8])
+	return filepath.Join(dir, name), nil
 }
 
 func (r *hostProxyRelay) serve() {
