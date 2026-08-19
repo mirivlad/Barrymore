@@ -48,7 +48,8 @@ if (card) {
     <p class="muted" style="margin:8px 0 0">
       Пустое поле отключает прокси. Если адрес задан, персонал запускается в
       отдельной сетевой песочнице: недоступный прокси означает отказ запуска,
-      а не попытку выйти напрямую.
+      а не попытку выйти напрямую. Изменение останавливает уже работающий
+      внешний персонал, чтобы одновременно не существовало разных маршрутов.
     </p>
     <div id="worker-proxy-status" class="muted" style="margin-top:8px">загрузка…</div>
   `;
@@ -57,7 +58,7 @@ if (card) {
   const apply = card.querySelector("#worker-proxy-apply");
   const status = card.querySelector("#worker-proxy-status");
   let activeRuns = 0;
-  let savedProxy = "";
+  let effectiveProxy = "";
 
   function show(message, tone = "") {
     status.textContent = message;
@@ -67,17 +68,25 @@ if (card) {
 
   async function refresh() {
     try {
-      const [settings, state] = await Promise.all([
-        request("/api/v1/settings"),
+      const [policy, state] = await Promise.all([
+        request("/api/v1/settings/worker-proxy"),
         request("/api/v1/system/state"),
       ]);
-      savedProxy = settings.settings?.worker_proxy || "";
-      input.value = savedProxy;
+      effectiveProxy = policy.worker_proxy || "";
+      input.value = effectiveProxy;
       activeRuns = (state.active_runs || []).length;
-      if (savedProxy) {
-        show(`Прокси включён. Работающих внешних процессов сейчас: ${activeRuns}.`, "ok");
+
+      const overrideNote = policy.overridden
+        ? " Действующее значение было задано при запуске и отличается от settings.json; " +
+          "нажатие «Применить» сохранит выбранное здесь значение."
+        : "";
+      if (effectiveProxy) {
+        show(
+          `Прокси включён. Работающих внешних процессов сейчас: ${activeRuns}.${overrideNote}`,
+          "ok",
+        );
       } else {
-        show(`Прокси выключен. Работающих внешних процессов сейчас: ${activeRuns}.`);
+        show(`Прокси выключен. Работающих внешних процессов сейчас: ${activeRuns}.${overrideNote}`);
       }
     } catch (err) {
       show(`Состояние сети не прочитано: ${err.message}`, "bad");
@@ -86,15 +95,23 @@ if (card) {
 
   apply.addEventListener("click", async () => {
     const next = input.value.trim();
-    if (next === savedProxy) {
-      show("Ничего не изменилось.");
-      return;
+    if (next === effectiveProxy) {
+      // POST всё равно нужен при command-line override: он синхронизирует
+      // settings.json с уже действующей policy. GET сообщает это явно.
+      try {
+        const policy = await request("/api/v1/settings/worker-proxy");
+        if (!policy.overridden) {
+          show("Ничего не изменилось.");
+          return;
+        }
+      } catch {
+        // Основной POST ниже даст пользователю нормальную ошибку.
+      }
     }
 
-    if (activeRuns > 0) {
-      const word = activeRuns === 1 ? "процесс" : "процессов";
+    if (activeRuns > 0 && next !== effectiveProxy) {
       const ok = confirm(
-        `Сейчас работает ${activeRuns} внешний ${word}. ` +
+        `Сейчас работает внешних процессов: ${activeRuns}. ` +
         "Изменение прокси остановит текущую работу персонала. Продолжить?"
       );
       if (!ok) return;
@@ -108,8 +125,8 @@ if (card) {
         method: "POST",
         body: JSON.stringify({ proxy: next }),
       });
-      savedProxy = result.worker_proxy || "";
-      input.value = savedProxy;
+      effectiveProxy = result.worker_proxy || "";
+      input.value = effectiveProxy;
       const stopped = Number(result.stopped_runs || 0);
       show(
         `${result.note}${stopped ? ` Остановлено текущих запусков: ${stopped}.` : ""}`,
@@ -118,7 +135,7 @@ if (card) {
       activeRuns = 0;
     } catch (err) {
       show(`Прокси не изменён: ${err.message}`, "bad");
-      input.value = savedProxy;
+      input.value = effectiveProxy;
     } finally {
       apply.disabled = false;
       input.disabled = false;
