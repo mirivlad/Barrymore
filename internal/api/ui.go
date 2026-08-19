@@ -27,13 +27,16 @@ func (s *Server) ui() http.Handler {
 	files := http.FileServer(http.FS(sub))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/settings/worker-proxy" {
-			if r.Method != http.MethodPost {
-				w.Header().Set("Allow", http.MethodPost)
+			switch r.Method {
+			case http.MethodGet:
+				s.getWorkerProxy(w, r)
+			case http.MethodPost:
+				s.setWorkerProxy(w, r)
+			default:
+				w.Header().Set("Allow", "GET, POST")
 				writeProblem(w, http.StatusMethodNotAllowed, "метод не поддерживается",
-					"для настройки прокси используйте POST")
-				return
+					"для настройки прокси используйте GET или POST")
 			}
-			s.setWorkerProxy(w, r)
 			return
 		}
 
