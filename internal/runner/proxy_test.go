@@ -157,6 +157,70 @@ func TestHostRelayForwardsOnlyToConfiguredProxy(t *testing.T) {
 	}
 }
 
+func TestProxyRouteStaysBoundToOriginalUpstream(t *testing.T) {
+	startTaggedProxy := func(tag byte) net.Listener {
+		t.Helper()
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ln.Close() })
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				go func() {
+					defer c.Close()
+					_, _ = c.Write([]byte{tag})
+					_, _ = io.Copy(io.Discard, c)
+				}()
+			}
+		}()
+		return ln
+	}
+
+	first := startTaggedProxy('A')
+	second := startTaggedProxy('B')
+
+	firstSocket, err := ensureWorkerProxyRelay("http://" + first.Addr().String())
+	if err != nil {
+		t.Fatalf("первый relay не поднялся: %v", err)
+	}
+	secondSocket, err := ensureWorkerProxyRelay("http://" + second.Addr().String())
+	if err != nil {
+		t.Fatalf("второй relay не поднялся: %v", err)
+	}
+	if firstSocket == secondSocket {
+		t.Fatalf("два upstream получили один socket path: %q", firstSocket)
+	}
+
+	readTag := func(path string) byte {
+		t.Helper()
+		c, err := net.Dial("unix", path)
+		if err != nil {
+			t.Fatalf("relay %q недоступен: %v", path, err)
+		}
+		defer c.Close()
+		var b [1]byte
+		if _, err := io.ReadFull(c, b[:]); err != nil {
+			t.Fatalf("relay %q не ответил: %v", path, err)
+		}
+		return b[0]
+	}
+
+	if got := readTag(firstSocket); got != 'A' {
+		t.Fatalf("первый socket после создания второго ушёл в upstream %q", got)
+	}
+	if got := readTag(secondSocket); got != 'B' {
+		t.Fatalf("второй socket ведёт в upstream %q", got)
+	}
+	if got := readTag(firstSocket); got != 'A' {
+		t.Fatalf("повторное соединение старого worker было перепривязано к %q", got)
+	}
+}
+
 func TestProxyOnlyRefusesWithoutBubblewrap(t *testing.T) {
 	t.Setenv(WorkerProxyEnv, "http://127.0.0.1:9")
 	plan := worker.RunPlan{
