@@ -73,6 +73,7 @@ install: build ## Поставить бинарник и пользовател�
 uninstall: ## Убрать службу и бинарник; данные остаются на месте
 	-@systemctl --user disable --now barrymore 2>/dev/null
 	-@rm -f $(HOME)/.config/systemd/user/barrymore.service
+	-@rm -f $(HOME)/.local/bin/barrymored
 	-@systemctl --user daemon-reload
 	@echo "Убрано. Данные и настройки не тронуты."
 
