@@ -8,7 +8,8 @@ import (
 	"github.com/mirivlad/barrymore/internal/runner"
 )
 
-func TestWorkerProxySettingAppliesWithoutRestart(t *testing.T) {
+func preserveWorkerProxyEnv(t *testing.T) {
+	t.Helper()
 	previous, hadPrevious := os.LookupEnv(runner.WorkerProxyEnv)
 	t.Cleanup(func() {
 		if hadPrevious {
@@ -18,6 +19,10 @@ func TestWorkerProxySettingAppliesWithoutRestart(t *testing.T) {
 		}
 		runner.CloseWorkerProxyRelays()
 	})
+}
+
+func TestWorkerProxySettingAppliesWithoutRestart(t *testing.T) {
+	preserveWorkerProxyEnv(t)
 	_ = os.Unsetenv(runner.WorkerProxyEnv)
 
 	s := newServer(t)
@@ -39,6 +44,11 @@ func TestWorkerProxySettingAppliesWithoutRestart(t *testing.T) {
 		t.Fatalf("effective policy = %q", got)
 	}
 
+	effective := s.mustDo(http.MethodGet, "/api/v1/settings/worker-proxy", nil, http.StatusOK)
+	if effective["worker_proxy"] != "http://127.0.0.1:12334" || effective["overridden"] != false {
+		t.Fatalf("GET не показывает действующую политику: %v", effective)
+	}
+
 	settings := s.mustDo(http.MethodGet, "/api/v1/settings", nil, http.StatusOK)
 	saved, _ := settings["settings"].(map[string]any)
 	if saved["worker_proxy"] != "http://127.0.0.1:12334" {
@@ -53,5 +63,24 @@ func TestWorkerProxySettingAppliesWithoutRestart(t *testing.T) {
 	}
 	if _, ok := os.LookupEnv(runner.WorkerProxyEnv); ok {
 		t.Fatal("effective proxy остался после отключения")
+	}
+}
+
+func TestWorkerProxyGetShowsCommandLineOverride(t *testing.T) {
+	preserveWorkerProxyEnv(t)
+	if err := os.Setenv(runner.WorkerProxyEnv, "http://127.0.0.1:43111"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Новый App имеет пустой settings.json, но effective policy уже задана так,
+	// как это бывает после запуска barrymored с -worker-proxy. UI обязан
+	// показывать реальность, а не пустое сохранённое значение.
+	s := newServer(t)
+	out := s.mustDo(http.MethodGet, "/api/v1/settings/worker-proxy", nil, http.StatusOK)
+	if out["worker_proxy"] != "http://127.0.0.1:43111" {
+		t.Fatalf("effective proxy потерян: %v", out)
+	}
+	if overridden, _ := out["overridden"].(bool); !overridden {
+		t.Fatalf("CLI override не отмечен: %v", out)
 	}
 }
