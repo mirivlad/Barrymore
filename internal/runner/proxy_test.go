@@ -9,9 +9,9 @@ func TestNormalizeWorkerProxy(t *testing.T) {
 	t.Parallel()
 
 	good := map[string]string{
-		"":                         "",
-		" http://127.0.0.1:8080/ ": "http://127.0.0.1:8080",
-		"SOCKS5://127.0.0.1:1080":  "socks5://127.0.0.1:1080",
+		"":                           "",
+		" http://127.0.0.1:8080/ ":   "http://127.0.0.1:8080",
+		"SOCKS5://127.0.0.1:1080":    "socks5://127.0.0.1:1080",
 		"socks5h://proxy.local:9050": "socks5h://proxy.local:9050",
 		"https://proxy.local:8443":   "https://proxy.local:8443",
 	}
