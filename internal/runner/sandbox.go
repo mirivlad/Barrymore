@@ -111,12 +111,8 @@ var ErrNoProxyIsolation = fmt.Errorf(
 		"без отдельного network namespace нельзя гарантировать отсутствие прямого выхода")
 
 // buildCommand оборачивает план запуска в сетевую generation, изоляцию и
-// супервизию.
-//
-// Для сетевого worker порядок внутренних обёрток такой:
-//
-//   systemd-run → bwrap → [proxy bridge] → network guard → worker.
-//
+// супервизию. Для сетевого worker порядок внутренних обёрток: systemd-run,
+// bwrap, при необходимости proxy bridge, затем network guard и сам worker.
 // Guard делает глобальную смену сетевой policy атомарной даже относительно
 // одновременно стартующего процесса. В proxy-only режиме bwrap закрывает
 // прямой IP-egress, а bridge даёт единственный предусмотренный сетевой маршрут.
