@@ -27,6 +27,14 @@ var (
 	workerNetworkEpochMu        sync.Mutex
 )
 
+// init перехватывает приватный режим раньше flag parser основного barrymored.
+func init() {
+	if len(os.Args) < 2 || os.Args[1] != internalWorkerNetworkGuardMode {
+		return
+	}
+	os.Exit(runWorkerNetworkGuard(os.Args[2:]))
+}
+
 // ErrNetworkPolicyChanging не даёт новому сетевому worker стартовать в
 // промежутке между остановкой старого персонала и публикацией новой policy.
 var ErrNetworkPolicyChanging = errors.New(
