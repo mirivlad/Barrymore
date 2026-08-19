@@ -13,7 +13,10 @@ ADDR ?= 127.0.0.1:7717
 # вместо прежней 35B MoE-модели, чтобы постоянно живущий дворецкий не требовал
 # тяжёлого resident inference для обычного разговора и диспетчеризации.
 LOCAL_MODEL ?= $(CURDIR)/data/local_models/Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf
-MODEL_FLAGS ?= -local-model-threads 14 -local-model-gpu-layers 99
+# Первый bring-up на 8 ГБ VRAM намеренно начинается с 8K контекста: сначала
+# проверяем поведение и скорость, затем поднимаем окно по фактической памяти.
+# История Barrymore хранится runtime'ом, а не обязана целиком жить в KV-cache.
+MODEL_FLAGS ?= -local-model-context 8192 -local-model-threads 14 -local-model-gpu-layers 99
 
 .PHONY: help build test test-race vet fmt lint run run-quiet dev install uninstall \
         clean host-audit rebuild ci e2e
