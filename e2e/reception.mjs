@@ -1,11 +1,12 @@
-// E2E-проверка Приёмной: настоящий браузер, настоящий сервер, настоящая база.
+// E2E-проверка продуктовой поверхности: настоящий браузер, настоящий сервер,
+// настоящая база.
 //
-// Проверяется главное обещание продукта: владелец начинает с разговора и
-// получает нить и поручение, ни разу не открыв вкладок «Нити» и «Поручения».
-// Unit-тесты API этого не показывают — они ходят тем же путём, но не глазами.
+// Главное обещание теперь сильнее прежнего: владелец начинает с разговора,
+// Бэрримор сам ведёт нити и поручения, а пользователь не обязан даже видеть
+// эти внутренние сущности. В обычном режиме видны Разговор, Настройки и Стол.
 //
-// И второе обещание, уже про сам экран: Приёмная — это разговор, а не пульт.
-// Состояние дел лежит справа, в сайдбаре, и не заслоняет собеседника.
+// Техническая глубина не удалена: отдельная часть сценария включает
+// технический режим и убеждается, что инспекторы по-прежнему доступны.
 //
 // Подделан ровно один слой — провайдер модели: ответ по контракту стоит минуты
 // машинного времени и к поведению экрана отношения не имеет.
@@ -62,22 +63,14 @@ function launch(cmd, args, env) {
 }
 
 // daylightTZ выбирает часовой пояс, в котором у сервера сейчас середина дня.
-//
-// Тихие часы (23:00–08:00 по местному времени сервера) — настоящее продуктовое
-// поведение: ночью Бэрримор придерживает несрочное до утра. Проверять сценарий
-// с обращением, зная, что после одиннадцати вечера он честно не появится,
-// значит получить тест, который «иногда падает». Поэтому серверу задаётся
-// пояс, а не подкручивается политика.
+// Тихие часы — настоящее продуктовое поведение, поэтому тест меняет пояс,
+// а не политику инициативы.
 function daylightTZ() {
   const offset = (12 - new Date().getUTCHours() + 24) % 24;
   const east = offset <= 12;
-  // В POSIX-именах Etc/GMT знак обратный: Etc/GMT-5 — это UTC+5.
   return `Etc/GMT${east ? "-" + offset : "+" + (24 - offset)}`;
 }
 
-// Служебное, чему не место в центре экрана при выключенном техническом режиме.
-// Список взят из того, что интерфейс действительно умеет показать: статус
-// провайдера, задержка, токены, путь к весам, идентификаторы, ревизии.
 const SERVICE_DATA = [
   [/\bready\b/i, "статус провайдера"],
   [/not_configured|unreachable/i, "внутренний статус runtime"],
@@ -96,9 +89,6 @@ async function main() {
   await mkdir(workspace, { recursive: true });
   await writeFile(path.join(workspace, "README.md"), "тестовый репозиторий\n");
 
-  // Незнакомый инструмент — настоящая программа в PATH, а не подделка вывода.
-  // Проверяется в том числе то, что Бэрримор действительно её запускает
-  // и читает напечатанное ею.
   const toolBin = path.join(dataRoot, "bin");
   await mkdir(toolBin, { recursive: true });
   await writeFile(path.join(toolBin, "crush"), `#!/bin/sh
@@ -142,9 +132,8 @@ esac
     }
   });
 
-  // Обнаружение исполнителей — шаг установки, а не часть сценария: владелец
-  // делает его однажды, кнопкой на вкладке «Штат». Здесь он выполняется
-  // запросом, чтобы проверка «вкладки не открывались» осталась честной.
+  // Обнаружение исполнителей — установка/служебная работа, а не ежедневная
+  // навигация владельца. Делается запросом, чтобы тест продукта не открывал Штат.
   await fetch(`${BASE}/api/v1/workers/discover`, {
     method: "POST", headers: { "content-type": "application/json" }, body: "{}",
   }).catch(() => {});
@@ -155,12 +144,6 @@ esac
   page.on("pageerror", (e) => consoleErrors.push(String(e)));
   await page.goto(BASE);
 
-  // ---------- общие проверки, которые должны держаться на всём пути ----------
-
-  // chatIsCentral следит за тем, чтобы разговор не съёжился до виджета.
-  // Это и есть та регрессия, которую словами не поймать: карточки прибывают
-  // по одной, каждая «маленькая», и в какой-то момент собеседник оказывается
-  // полоской посреди дашборда.
   async function chatIsCentral(where) {
     const chat = await page.locator("#chat").boundingBox();
     const talk = await page.locator(".talk").boundingBox();
@@ -175,8 +158,6 @@ esac
     if (chat.height < view.height * 0.4) {
       throw new Error(`${where}: разговору отдано ${Math.round(chat.height)}px высоты из ${view.height}`);
     }
-    // Разговор должен быть выше всего остального в центральной колонке:
-    // если карточка снова вылезет над ним, эта проверка её и поймает.
     const others = await page.locator(".talk > *:not(#chat)").all();
     for (const el of others) {
       const box = await el.boundingBox();
@@ -197,7 +178,11 @@ esac
     }
   }
 
-  console.log("Первый взгляд на Приёмную:");
+  async function currentTab() {
+    return (await page.locator("nav button[aria-current='true']").innerText()).trim();
+  }
+
+  console.log("Первый взгляд на Бэрримора:");
 
   await check("в центре разговор и поле ввода, и ничего больше", async () => {
     await chatIsCentral("на входе");
@@ -205,17 +190,32 @@ esac
     if (cards) throw new Error(`в центре ${cards} карточек`);
   });
 
-  await check("сайдбар закрыт, видна только кнопка со счётчиком", async () => {
+  await check("обычная навигация не показывает кишки runtime", async () => {
+    const visible = [];
+    for (const button of await page.locator("nav button").all()) {
+      if (await button.isVisible()) visible.push((await button.innerText()).trim());
+    }
+    const want = ["Разговор", "Настройки"];
+    if (JSON.stringify(visible) !== JSON.stringify(want)) {
+      throw new Error(`видимые вкладки: ${visible.join(", ")}`);
+    }
+    for (const internal of ["Нити", "Штат", "Поручения", "Память", "Состояние", "Журнал"]) {
+      if (visible.includes(internal)) throw new Error(`в обычном режиме видна вкладка «${internal}»`);
+    }
+  });
+
+  await check("Стол закрыт, видна только кнопка со счётчиком", async () => {
     if (await page.locator("#affairs").isVisible()) {
-      throw new Error("сайдбар раскрыт с порога");
+      throw new Error("Стол раскрыт с порога");
     }
     const toggle = page.locator("#affairs-toggle");
-    if (!(await toggle.isVisible())) throw new Error("кнопки дел не видно");
+    if (!(await toggle.isVisible())) throw new Error("кнопки Стола не видно");
+    if (!(await toggle.innerText()).includes("Стол")) throw new Error("Стол всё ещё называется внутренним термином");
     const count = await page.locator("#affairs-count").innerText();
     if (!/^\d+$/.test(count.trim())) throw new Error(`счётчик показывает «${count}»`);
   });
 
-  await check("технический переключатель убран из шапки", async () => {
+  await check("технический переключатель живёт в Настройках", async () => {
     if (await page.locator("header #tech-mode").count()) {
       throw new Error("переключатель по-прежнему в основной шапке");
     }
@@ -224,12 +224,16 @@ esac
     }
   });
 
-  await check("нить не выбирают до разговора", async () => {
-    const selects = await page.locator("#tab-talk select").count();
-    if (selects > 0) throw new Error(`в Приёмной ${selects} выпадающих списков`);
+  await check("нить не выбирают и не показывают до разговора", async () => {
+    if (await page.locator("#tab-talk select").count()) {
+      throw new Error("в разговоре появился выбор внутренней сущности");
+    }
+    if (await page.locator("#thread-line").isVisible()) {
+      throw new Error("в обычном режиме показана внутренняя нить");
+    }
   });
 
-  console.log("Разговор заводит нить:");
+  console.log("Разговор заводит внутренний контекст:");
 
   await check("разговор начинается с одной реплики", async () => {
     await page.locator("#talk-input").fill("У меня Rollboard завис в worktree");
@@ -237,7 +241,7 @@ esac
     await page.locator(".bubble.barrymore").first().waitFor({ timeout: 30000 });
   });
 
-  await check("предложение нити пришло в сайдбар, с готовым состоянием", async () => {
+  await check("предложение нового дела пришло на Стол с готовым состоянием", async () => {
     const box = page.locator("#affairs");
     await box.getByText("Похоже, это новое дело").waitFor({ timeout: 10000 });
     for (const field of ["Чего хотим", "Где остановились", "Следующий шаг"]) {
@@ -247,52 +251,32 @@ esac
     }
   });
 
-  await check("предложение лежит под «требует вашего решения»", async () => {
+  await check("решение лежит на Столе под «требует вашего решения»", async () => {
     const group = await page.locator("#affairs-groups h3").first().innerText();
     if (!group.startsWith("Требует вашего решения")) {
-      throw new Error(`первый раздел сайдбара — «${group}»`);
+      throw new Error(`первый раздел Стола — «${group}»`);
     }
   });
 
-  await check("нить заводится одним нажатием", async () => {
+  await check("внутренняя нить создаётся, но не появляется в обычном UI", async () => {
     await page.getByRole("button", { name: "Завести нить" }).click();
-    await page.locator("#thread-line").waitFor({ state: "visible", timeout: 10000 });
-    const text = await page.locator("#thread-line").innerText();
-    if (!text.includes("Rollboard")) throw new Error(`в строке нити: ${text.slice(0, 120)}`);
-  });
-
-  await check("нить обозначена строкой, а не карточкой над разговором", async () => {
-    const box = await page.locator("#thread-line").boundingBox();
-    if (box.height > 34) throw new Error(`строка нити высотой ${Math.round(box.height)}px`);
-    if (await page.locator("#thread-state").count()) {
-      throw new Error("карточка канонического состояния вернулась в поток");
+    await waitFor("нить записана", async () => {
+      const threads = await (await fetch(`${BASE}/api/v1/threads`)).json();
+      return (threads.items || []).length === 1;
+    });
+    if (await page.locator("#thread-line").isVisible()) {
+      throw new Error("после создания наружу вылезло имя внутренней нити");
     }
-  });
-
-  await check("полное состояние нити открывается тут же, в сайдбаре", async () => {
-    await page.locator("#thread-line").click();
-    const detail = page.locator("#affairs-detail");
-    await detail.getByText("Чего хотим").waitFor({ timeout: 5000 });
-    const text = await detail.innerText();
-    if (!text.includes("разобраться")) throw new Error("состояние не перенесено в нить");
-    if (!text.includes("вернуть прежнее")) throw new Error("автоматическая правка необратима");
-    const current = await page.locator("nav button[aria-current='true']").innerText();
-    if (current !== "Приёмная") throw new Error(`ушли на вкладку «${current}»`);
-    await page.locator("#thread-line").click();
+    if (await page.locator("#thread-state").count()) {
+      throw new Error("каноническое состояние нити вернулось в поток разговора");
+    }
   });
 
   await check("разговор остался центральным", async () => {
-    await chatIsCentral("после заведения нити");
+    await chatIsCentral("после заведения внутреннего контекста");
+    if (await currentTab() !== "Разговор") throw new Error(`активна вкладка «${await currentTab()}»`);
   });
 
-  await check("вкладки «Нити» и «Поручения» не открывались", async () => {
-    const current = await page.locator("nav button[aria-current='true']").innerText();
-    if (current !== "Приёмная") throw new Error(`активна вкладка «${current}»`);
-  });
-
-  // Поручение требует установленного исполнителя. Его отсутствие — не провал
-  // интерфейса, и притворяться, что проверка прошла, нельзя: на машине без
-  // исполнителей эта часть честно пропускается, а не тихо считается пройденной.
   const workers = await (await fetch(`${BASE}/api/v1/workers`)).json();
   const runnable = (workers.items || []).some(
     (w) => (w.worker ?? w).auth_state === "configured" && (w.worker ?? w).enabled);
@@ -301,18 +285,21 @@ esac
   if (!runnable) {
     console.log("  ~ поручение не проверено: на машине нет настроенного исполнителя");
   } else {
-    console.log("Поручение из разговора:");
+    console.log("Персонал из разговора:");
 
-    await check("предложение содержит всё, что нужно для решения", async () => {
+    await check("Бэрримор объясняет существенное, а не показывает WorkOrder", async () => {
       const box = page.locator("#affairs");
       await box.getByText("Предлагаю поручить").waitFor({ timeout: 10000 });
       const text = await box.innerText();
       for (const field of ["каталог", "что считается сделанным", "доступ"]) {
-        if (!text.includes(field)) throw new Error(`нет поля «${field}»`);
+        if (!text.includes(field)) throw new Error(`нет существенного поля «${field}»`);
+      }
+      if (/workorder|contextpack|heartbeat|sandbox_profile/i.test(text)) {
+        throw new Error("на Стол вылез внутренний протокол поручения");
       }
     });
 
-    await check("подтверждение появляется здесь же, в сайдбаре", async () => {
+    await check("подтверждение появляется на Столе", async () => {
       await page.getByRole("button", { name: "Поручить", exact: true }).click();
       await page.locator("#affairs").getByText("Запустить исполнителя?")
         .waitFor({ timeout: 20000 });
@@ -321,15 +308,15 @@ esac
       if (!text.includes("только чтение")) throw new Error("не сказано, что запуск без записи");
     });
 
-    await check("решение принимается без перехода на другую вкладку", async () => {
-      const before = await page.locator("nav button[aria-current='true']").innerText();
+    await check("решение принимается без ухода из разговора", async () => {
+      const before = await currentTab();
       await page.getByRole("button", { name: "Подтвердить и запустить" }).click();
       await waitFor("поручение пошло", async () => {
         const d = await (await fetch(`${BASE}/api/v1/work-orders`)).json();
         return (d.items || []).some((o) => o.state !== "proposed" && o.state !== "draft");
       });
-      const after = await page.locator("nav button[aria-current='true']").innerText();
-      if (before !== "Приёмная" || after !== "Приёмная") {
+      const after = await currentTab();
+      if (before !== "Разговор" || after !== "Разговор") {
         throw new Error(`вкладка сменилась: было «${before}», стало «${after}»`);
       }
       ordered = true;
@@ -343,8 +330,8 @@ esac
       }
     });
 
-    await check("разговор остался центральным и после поручения", async () => {
-      await chatIsCentral("после запуска поручения");
+    await check("разговор остался центральным и после запуска персонала", async () => {
+      await chatIsCentral("после запуска исполнителя");
     });
   }
 
@@ -354,9 +341,6 @@ esac
 
   if (ordered) {
     console.log("Пока владелец разговаривал:");
-    // Настоящий прогон исполнителя занимает минуты и зависит от сети. Если он
-    // не успел, это не провал интерфейса — но и не повод считать проверку
-    // пройденной.
     let finished = false;
     try {
       await waitFor("поручение завершилось", async () => {
@@ -369,7 +353,7 @@ esac
     }
 
     if (finished) {
-      await check("обращение о завершении появилось в сайдбаре", async () => {
+      await check("обращение о завершении появилось на Столе", async () => {
         await waitFor("обращение дошло до экрана", async () => {
           const text = await page.locator("#affairs").innerText();
           return text.includes("Поручение выполнено") || text.includes("Поручение не вышло");
@@ -381,9 +365,7 @@ esac
           hasText: /Поручение (выполнено|не вышло)/,
         }).first();
         const which = await item.locator(".affair-which").innerText();
-        if (!which.includes("Rollboard")) {
-          throw new Error(`дело не названо: «${which}»`);
-        }
+        if (!which.includes("Rollboard")) throw new Error(`дело не названо: «${which}»`);
         await item.locator(".affair-head").click();
         const body = await item.locator(".affair-body").innerText();
         if (!body.includes("Почему сейчас")) throw new Error("нет ответа на «почему сейчас»");
@@ -398,14 +380,14 @@ esac
 
   console.log("Пока Бэрримор думает:");
 
-  await check("вопрос и секундомер переживают уход на другую вкладку", async () => {
+  await check("вопрос и секундомер переживают уход в Настройки", async () => {
     await page.locator("#talk-input").fill("Не спеши, подумай как следует");
     await page.locator("#talk-send").click();
     await page.locator("#thinking").waitFor({ timeout: 5000 });
 
-    // Владелец ушёл посмотреть нити и вернулся. Раньше на этом месте его
-    // ждал пустой экран, будто он спросил в пустоту.
-    await page.locator("nav button[data-tab='threads']").click();
+    // Пользователь уходит по единственной обычной служебной вкладке. Нити для
+    // проверки устойчивости чата больше не нужны и в обычном режиме не видны.
+    await page.locator("nav button[data-tab='settings']").click();
     await page.waitForTimeout(800);
     await page.locator("nav button[data-tab='talk']").click();
 
@@ -417,8 +399,6 @@ esac
   });
 
   await check("ответ всё равно приходит на место", async () => {
-    // Ждём именно исчезновения секундомера: искать текст ответа бесполезно,
-    // он уже есть выше от прошлых ходов.
     await page.locator("#thinking").waitFor({ state: "detached", timeout: 30000 });
     const bubbles = await page.locator("#chat .bubble.barrymore").count();
     if (bubbles < 2) throw new Error("ответ не появился");
@@ -450,8 +430,7 @@ esac
     if ((after.items || []).length !== (before.items || []).length) {
       throw new Error("собственное умение всё-таки создало поручение");
     }
-    const current = await page.locator("nav button[aria-current='true']").innerText();
-    if (current !== "Приёмная") throw new Error(`ушли на вкладку «${current}»`);
+    if (await currentTab() !== "Разговор") throw new Error(`ушли на вкладку «${await currentTab()}»`);
   });
 
   await check("посмотрел быстрее, чем успел бы позвать исполнителя", async () => {
@@ -471,8 +450,6 @@ esac
 
   console.log("Бэрримор учится:");
 
-  // Порядок действий владелец повторяет сам — запросами, а не через экран:
-  // проверяется не то, как нажимаются кнопки, а то, что Бэрримор это заметил.
   const applySkill = (id) =>
     fetch(`${BASE}/api/v1/skills/${id}/apply`, {
       method: "POST", headers: { "content-type": "application/json" },
@@ -480,8 +457,6 @@ esac
     });
 
   await check("повторяющийся порядок действий замечен", async () => {
-    // Три захода, а не два: первый сливается с уже применённой на этом
-    // каталоге диагностикой worktree и в отдельный порядок не выделяется.
     for (let round = 0; round < 3; round++) {
       for (const id of ["workspace.survey", "workspace.who"]) {
         const res = await applySkill(id);
@@ -494,7 +469,7 @@ esac
     if (seq.seen_times < 2) throw new Error(`повторов насчитано ${seq.seen_times}`);
   });
 
-  await check("Бэрримор просит освоить новый способ прямо в Приёмной", async () => {
+  await check("Бэрримор предлагает новый способ на Столе", async () => {
     await page.reload();
     await page.locator("#affairs-toggle").click();
     await page.locator("#affairs").getByText("Могу освоить новый способ")
@@ -502,7 +477,6 @@ esac
   });
 
   await check("освоенное умение появляется и применимо", async () => {
-    // Подробности раскрываются нажатием, не уводя с Приёмной.
     await page.locator("#affairs .affair", { hasText: "Могу освоить новый способ" })
       .locator(".affair-head").click();
     await page.getByRole("button", { name: "Осваивайте" }).click();
@@ -532,23 +506,23 @@ esac
     if (p.avg_ms <= 0) throw new Error("цена способа не измерена: сравнить не с чем");
   });
 
-  console.log("Узнавание уже существующей нити:");
+  console.log("Узнавание существующего контекста:");
 
-  await check("новый разговор сам находит прежнюю нить", async () => {
+  await check("новый разговор сам находит прежнюю нить, не показывая её", async () => {
     await page.getByRole("button", { name: "Новый разговор" }).click();
     await page.locator("#talk-input").fill("Вернёмся к Rollboard: что там с worktree?");
     await page.locator("#talk-send").click();
 
-    // Связь Бэрримор делает сам — нажимать нечего, и это главное отличие
-    // от прежнего порядка, где нить выбирали из списка до первой реплики.
-    await page.locator("#thread-line").waitFor({ state: "visible", timeout: 30000 });
-    const text = await page.locator("#thread-line").innerText();
-    if (!text.includes("Rollboard")) throw new Error(`строка нити: ${text.slice(0, 120)}`);
+    await waitFor("прежняя нить узнана", async () => {
+      const threads = await (await fetch(`${BASE}/api/v1/threads`)).json();
+      return (threads.items || []).length === 1;
+    }, 30000);
+    if (await page.locator("#thread-line").isVisible()) {
+      throw new Error("узнанная внутренняя нить появилась в обычном интерфейсе");
+    }
   });
 
-  await check("владельцу сказано, что разговор отнесён к нити", async () => {
-    // Связь — не решение, а перемена: она лежит в «Изменилось», и сайдбар
-    // ради неё сам не раскрывается.
+  await check("владельцу сказано человеческим языком, что контекст узнан", async () => {
     if (!(await page.locator("#affairs").isVisible())) {
       await page.locator("#affairs-toggle").click();
     }
@@ -558,7 +532,7 @@ esac
     }
   });
 
-  await check("к прошлому разговору можно вернуться, не уходя из Приёмной", async () => {
+  await check("к прошлому разговору можно вернуться, не уходя с продуктовой поверхности", async () => {
     await page.getByRole("button", { name: "Прошлые разговоры" }).click();
     const list = page.locator("#affairs-detail");
     await list.getByText("Прошлые разговоры").waitFor({ timeout: 10000 });
@@ -569,9 +543,7 @@ esac
     await rows.last().click();
     await waitFor("открылся прежний разговор", async () =>
       (await page.locator("#chat").innerText()).includes("завис в worktree"));
-    const current = await page.locator("nav button[aria-current='true']").innerText();
-    if (current !== "Приёмная") throw new Error(`ушли на вкладку «${current}»`);
-    // Возвращаемся к последнему разговору: дальше проверяется он.
+    if (await currentTab() !== "Разговор") throw new Error(`ушли на вкладку «${await currentTab()}»`);
     await page.getByRole("button", { name: "Прошлые разговоры" }).click();
     await page.locator("#affairs-detail li").first().click();
     await waitFor("вернулись к последнему разговору", async () =>
@@ -584,29 +556,34 @@ esac
     if (count !== 1) throw new Error(`нитей ${count}, ожидалась одна: узнавание не сработало`);
   });
 
-  await check("связь можно снять, не уходя из Приёмной", async () => {
-    await page.locator("#thread-line").click();
-    page.once("dialog", (d) => d.accept());
-    await page.getByRole("button", { name: "Не про эту нить" }).click();
-    await waitFor("строка нити исчезла", async () => await page.locator("#thread-line").isHidden());
-    const current = await page.locator("nav button[aria-current='true']").innerText();
-    if (current !== "Приёмная") throw new Error(`ушли на вкладку «${current}»`);
-  });
-
   console.log("После перезагрузки:");
 
-  await check("сайдбар снова закрыт, а счётчик на месте", async () => {
+  await check("Стол снова закрыт, а разговор открыт", async () => {
     await page.reload();
     await page.locator("#affairs-toggle").waitFor({ state: "visible", timeout: 10000 });
-    if (await page.locator("#affairs").isVisible()) {
-      throw new Error("после перезагрузки сайдбар раскрыт");
-    }
-    await page.locator("#affairs-count").waitFor({ state: "visible" });
+    if (await page.locator("#affairs").isVisible()) throw new Error("после перезагрузки Стол раскрыт");
+    if (await currentTab() !== "Разговор") throw new Error(`после reload активна вкладка «${await currentTab()}»`);
   });
 
   await check("разговор по-прежнему в центре", async () => {
     await chatIsCentral("после перезагрузки");
     await centreIsClean("после перезагрузки");
+  });
+
+  console.log("Технический режим:");
+
+  await check("внутренние инспекторы возвращаются только по явному переключателю", async () => {
+    await page.locator("nav button[data-tab='settings']").click();
+    await page.locator("#tech-mode").check();
+    for (const tab of ["threads", "staff", "orders", "memory", "state", "journal"]) {
+      if (!(await page.locator(`nav button[data-tab='${tab}']`).isVisible())) {
+        throw new Error(`техническая вкладка ${tab} не вернулась`);
+      }
+    }
+    await page.locator("nav button[data-tab='talk']").click();
+    if (!(await page.locator("#thread-line").isVisible())) {
+      throw new Error("инспектор текущей нити не вернулся в техническом режиме");
+    }
   });
 
   console.log("Незнакомый инструмент:");
@@ -658,5 +635,5 @@ main()
       console.error(`\nE2E: провалов ${failures}`);
       process.exit(1);
     }
-    console.log("\nE2E: интерфейс проходит сценарий целиком");
+    console.log("\nE2E: продуктовая поверхность проходит сценарий целиком");
   });
