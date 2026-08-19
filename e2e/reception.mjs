@@ -513,10 +513,19 @@ esac
     await page.locator("#talk-input").fill("Вернёмся к Rollboard: что там с worktree?");
     await page.locator("#talk-send").click();
 
-    await waitFor("прежняя нить узнана", async () => {
-      const threads = await (await fetch(`${BASE}/api/v1/threads`)).json();
-      return (threads.items || []).length === 1;
+    // Одна нить существовала ещё до этой реплики, поэтому ждать просто
+    // `threads.length === 1` было гонкой: условие становилось истинным раньше,
+    // чем второй ход вообще успевал закончиться. Синхронизируемся по видимому
+    // результату самого действия — Бэрримор сообщил, что узнал прежний контекст.
+    await waitFor("прежний контекст узнан и показан на Столе", async () => {
+      const text = await page.locator("#affairs").innerText();
+      return text.includes("Отнёс разговор к нити");
     }, 30000);
+
+    const threads = await (await fetch(`${BASE}/api/v1/threads`)).json();
+    if ((threads.items || []).length !== 1) {
+      throw new Error(`нитей ${(threads.items || []).length}, ожидалась одна`);
+    }
     if (await page.locator("#thread-line").isVisible()) {
       throw new Error("узнанная внутренняя нить появилась в обычном интерфейсе");
     }
