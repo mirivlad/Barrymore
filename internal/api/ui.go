@@ -36,6 +36,24 @@ func (s *Server) ui() http.Handler {
 			s.setWorkerProxy(w, r)
 			return
 		}
+
+		// Основной app.js большой и давно проверяется E2E. Новые независимые
+		// поверхности подключаются маленькими ES-модулями, чтобы изменение одной
+		// настройки не требовало переписывать монолитный файл и не увеличивало
+		// радиус случайной поломки перед живым запуском.
+		if r.URL.Path == "/app.js" && r.Method == http.MethodGet {
+			base, err := webFS.ReadFile("web/app.js")
+			if err != nil {
+				writeProblem(w, http.StatusInternalServerError, "интерфейс недоступен", err.Error())
+				return
+			}
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-store")
+			_, _ = w.Write(base)
+			_, _ = w.Write([]byte("\nimport \"/proxy.js\";\n"))
+			return
+		}
+
 		if r.URL.Path == "/" {
 			w.Header().Set("Cache-Control", "no-store")
 		}
