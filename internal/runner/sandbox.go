@@ -110,13 +110,18 @@ var ErrNoProxyIsolation = fmt.Errorf(
 	"запуск через обязательный прокси невозможен: bubblewrap недоступен; " +
 		"без отдельного network namespace нельзя гарантировать отсутствие прямого выхода")
 
-// buildCommand оборачивает план запуска в изоляцию и супервизию.
+// buildCommand оборачивает план запуска в сетевую generation, изоляцию и
+// супервизию.
 //
-// Порядок обёрток: systemd-run --scope → bwrap → встроенный proxy bridge →
-// сам исполнитель. Внешняя обёртка даёт устойчивую идентичность процесса,
-// bwrap закрывает прямой IP-egress, bridge даёт единственный предусмотренный
-// Barrymore сетевой маршрут. Полная изоляция от произвольных file-backed
-// Unix-сокетов хоста этим слоем пока не заявляется (ADR 0023).
+// Для сетевого worker порядок внутренних обёрток такой:
+//
+//   systemd-run → bwrap → [proxy bridge] → network guard → worker.
+//
+// Guard делает глобальную смену сетевой policy атомарной даже относительно
+// одновременно стартующего процесса. В proxy-only режиме bwrap закрывает
+// прямой IP-egress, а bridge даёт единственный предусмотренный сетевой маршрут.
+// Полная изоляция от произвольных file-backed Unix-сокетов хоста этим слоем
+// пока не заявляется (ADR 0023).
 func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) ([]string, SandboxProfile, error) {
 	proxyRaw := os.Getenv(WorkerProxyEnv)
 	proxyOnly := proxyRaw != "" && plan.Sandbox.Network
@@ -127,6 +132,27 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 	}
 
 	inner := append([]string(nil), plan.Argv...)
+
+	// Любой worker, которому нужна сеть, получает generation guard — не только
+	// proxy-only. Иначе переход direct → proxy мог бы оставить старый direct
+	// процесс жить после того, как интерфейс уже сообщил о новой политике.
+	if plan.Sandbox.Network {
+		if workerNetworkPolicyChanging.Load() {
+			return nil, profile, ErrNetworkPolicyChanging
+		}
+		policyPath, epoch, err := workerNetworkEpochSnapshot()
+		if err != nil {
+			return nil, profile, err
+		}
+		self, err := os.Executable()
+		if err != nil {
+			return nil, profile, fmt.Errorf("runner: собственный бинарник для network guard не найден: %w", err)
+		}
+		inner = append([]string{
+			self, internalWorkerNetworkGuardMode, policyPath, epoch, "--",
+		}, inner...)
+	}
+
 	if proxyOnly {
 		if caps.Bwrap == "" {
 			return nil, profile, ErrNoProxyIsolation
@@ -139,6 +165,8 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 		if err != nil {
 			return nil, profile, fmt.Errorf("runner: собственный бинарник для proxy bridge не найден: %w", err)
 		}
+		// Bridge снаружи guard: он даёт loopback transport, а guard владеет
+		// непосредственно полезным worker и его дочерней process group.
 		inner = append([]string{self, internalWorkerProxyBridgeMode, socketPath, "--"}, inner...)
 	}
 
