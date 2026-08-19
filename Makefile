@@ -8,13 +8,22 @@ DATA_ROOT ?= $(CURDIR)/data/runtime
 WORKSPACE_ROOTS ?= $(HOME)/git
 ADDR ?= 127.0.0.1:7717
 
-# Локальная модель. Параметры подтверждены спайком S1 на этом хосте:
-# эксперты MoE на CPU, остальные слои на видеокарту — 94/18 токенов в секунду.
-LOCAL_MODEL ?= $(CURDIR)/data/local_models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
-MODEL_FLAGS ?= -local-model-threads 14 -local-model-gpu-layers 99 -local-model-cpu-moe 40
+# Локальная модель для живого dev-прогона. Это не продуктовая зависимость:
+# модель остаётся сменяемой через настройки. Сейчас пробуем компактную Ornith
+# вместо прежней 35B MoE-модели, чтобы постоянно живущий дворецкий не требовал
+# тяжёлого resident inference для обычного разговора и диспетчеризации.
+LOCAL_MODEL ?= $(CURDIR)/data/local_models/Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf
+# Первый bring-up на 8 ГБ VRAM намеренно начинается с 8K контекста: сначала
+# проверяем поведение и скорость, затем поднимаем окно по фактической памяти.
+# История Barrymore хранится runtime'ом, а не обязана целиком жить в KV-cache.
+# Значения заданы явно, включая нули: старый settings.json от 35B MoE-модели
+# не должен незаметно вернуть cpu_moe или внешний provider в тест Ornith.
+MODEL_FLAGS ?= -local-model-context 8192 -local-model-threads 14 \
+	-local-model-gpu-layers 99 -local-model-cpu-moe 0 -local-model-port 18080 \
+	-llama-server= -provider= -provider-model=local -provider-label=Ornith
 
 .PHONY: help build test test-race vet fmt lint run run-quiet dev install uninstall \
-        clean host-audit rebuild ci e2e
+        clean host-audit rebuild ci e2e ornith-ready
 
 help: ## Показать список целей
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -44,7 +53,26 @@ e2e: build ## Проверить интерфейс настоящим брау�
 
 ci: lint test-race build ## Локальный CI
 
-run: build ## Запустить Бэрримора вместе с локальной моделью
+ornith-ready: ## Проверить окружение первого живого запуска Ornith
+	@test -f "$(LOCAL_MODEL)" || { \
+		echo "Не найден файл модели:"; \
+		echo "  $(LOCAL_MODEL)"; \
+		echo "Ожидается Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf в data/local_models/"; \
+		echo "Если установлен hf: hf download AtomicChat/Ornith-1.5-9B-GGUF Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf --local-dir data/local_models"; \
+		exit 1; \
+	}
+	@printf "модель: "; ls -lh "$(LOCAL_MODEL)" | awk '{print $$5, $$9}'
+	@printf "llama-server: "; \
+		if test -x third_party/llama.cpp/build/bin/llama-server; then \
+			echo third_party/llama.cpp/build/bin/llama-server; \
+		elif command -v llama-server >/dev/null 2>&1; then \
+			command -v llama-server; \
+		else \
+			echo "не найден (Barrymore также проверит ~/.local/bin и ~/llama.cpp/build/bin)"; \
+		fi
+	@printf "bubblewrap: "; command -v bwrap 2>/dev/null || echo "не найден — сам Barrymore работает, proxy-only персонал запускаться не будет"
+
+run: build ornith-ready ## Запустить Бэрримора вместе с локальной Ornith
 	$(BIN) -addr $(ADDR) -data-root $(DATA_ROOT) -workspace-roots $(WORKSPACE_ROOTS) \
 		-local-model $(LOCAL_MODEL) $(MODEL_FLAGS)
 

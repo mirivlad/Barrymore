@@ -2,13 +2,16 @@
 //
 // ADR 0006: идентичность процесса — имя systemd-scope плюс пара
 // (pid, время старта из /proc). ADR 0007: audit-only обеспечивается
-// изоляцией ядра, а не просьбой к исполнителю.
+// изоляцией ядра, а не просьбой исполнителю.
 package runner
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/mirivlad/barrymore/internal/worker"
 )
@@ -21,12 +24,19 @@ type Capabilities struct {
 	Reasons map[string]string `json:"reasons,omitempty"`
 }
 
-// DetectCapabilities проверяет доступность bwrap и systemd-run.
+// DetectCapabilities проверяет не только наличие bwrap и systemd-run, но и
+// возможность реально использовать bubblewrap. На контейнерных/CI-хостах
+// бинарник может существовать, а создание user/network namespace быть
+// запрещено ядром или политикой хоста. Считать такую установку изоляцией нельзя.
 func DetectCapabilities() Capabilities {
 	c := Capabilities{Reasons: map[string]string{}}
 
 	if p, err := exec.LookPath("bwrap"); err == nil {
-		c.Bwrap = p
+		if probeErr := probeBubblewrap(p); probeErr == nil {
+			c.Bwrap = p
+		} else {
+			c.Reasons["bwrap"] = "найден, но пробная изоляция не работает: " + probeErr.Error()
+		}
 	} else {
 		c.Reasons["bwrap"] = "не найден в PATH: " + err.Error()
 	}
@@ -43,15 +53,48 @@ func DetectCapabilities() Capabilities {
 	return c
 }
 
+func probeBubblewrap(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Это минимальный реальный профиль из тех же примитивов, на которых
+	// строится запуск worker: read-only root, отдельные /proc и /dev,
+	// временный /tmp и отдельный network namespace. Если хотя бы один из них
+	// запрещён хостом, audit-only/proxy-only обещать нельзя.
+	cmd := exec.CommandContext(ctx, path,
+		"--ro-bind", "/", "/",
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--tmpfs", "/tmp",
+		"--unshare-net",
+		"--new-session",
+		"--", "/bin/true",
+	)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return fmt.Errorf("пробный запуск не завершился за 3 секунды: %w", ctx.Err())
+	}
+	if err == nil {
+		return nil
+	}
+	if detail := strings.TrimSpace(string(out)); detail != "" {
+		return fmt.Errorf("%w: %s", err, detail)
+	}
+	return err
+}
+
 // SandboxProfile — итоговое описание изоляции конкретного запуска.
 type SandboxProfile struct {
 	// Isolation — bwrap либо none.
 	Isolation string `json:"isolation"`
 	// Supervision — systemd-scope либо process-group.
-	Supervision string   `json:"supervision"`
-	ReadOnlyFS  bool     `json:"read_only_fs"`
-	Network     bool     `json:"network"`
-	Writable    []string `json:"writable"`
+	Supervision string `json:"supervision"`
+	ReadOnlyFS  bool   `json:"read_only_fs"`
+	// Network означает обычный прямой network namespace хоста. При ProxyOnly
+	// он всегда false: worker видит только loopback в собственной netns.
+	Network   bool     `json:"network"`
+	ProxyOnly bool     `json:"proxy_only,omitempty"`
+	Writable  []string `json:"writable"`
 	// Warnings перечисляет ослабления, о которых обязан знать владелец.
 	Warnings []string `json:"warnings,omitempty"`
 }
@@ -61,17 +104,67 @@ var ErrNoIsolation = fmt.Errorf(
 	"audit-only запуск невозможен: bubblewrap недоступен, " +
 		"а полагаться на добросовестность исполнителя нельзя (ADR 0007)")
 
-// buildCommand оборачивает план запуска в изоляцию и супервизию.
-//
-// Порядок обёрток: systemd-run --scope → bwrap → сам исполнитель.
-// Внешняя обёртка даёт устойчивую идентичность процесса, внутренняя — границы.
+// ErrNoProxyIsolation возвращается, когда владелец потребовал proxy-only, но
+// kernel boundary построить нечем. В таком режиме прямой запуск запрещён.
+var ErrNoProxyIsolation = fmt.Errorf(
+	"запуск через обязательный прокси невозможен: bubblewrap недоступен; " +
+		"без отдельного network namespace нельзя гарантировать отсутствие прямого выхода")
+
+// buildCommand оборачивает план запуска в сетевую generation, изоляцию и
+// супервизию. Для сетевого worker порядок внутренних обёрток: systemd-run,
+// bwrap, при необходимости proxy bridge, затем network guard и сам worker.
+// Guard делает глобальную смену сетевой policy атомарной даже относительно
+// одновременно стартующего процесса. В proxy-only режиме bwrap закрывает
+// прямой IP-egress, а bridge даёт единственный предусмотренный сетевой маршрут.
+// Полная изоляция от произвольных file-backed Unix-сокетов хоста этим слоем
+// пока не заявляется (ADR 0023).
 func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) ([]string, SandboxProfile, error) {
+	proxyRaw := os.Getenv(WorkerProxyEnv)
+	proxyOnly := proxyRaw != "" && plan.Sandbox.Network
 	profile := SandboxProfile{
 		Isolation: "none", Supervision: "process-group",
-		Network: plan.Sandbox.Network,
+		Network:   plan.Sandbox.Network && !proxyOnly,
+		ProxyOnly: proxyOnly,
 	}
 
 	inner := append([]string(nil), plan.Argv...)
+
+	// Любой worker, которому нужна сеть, получает generation guard — не только
+	// proxy-only. Иначе переход direct → proxy мог бы оставить старый direct
+	// процесс жить после того, как интерфейс уже сообщил о новой политике.
+	if plan.Sandbox.Network {
+		if workerNetworkPolicyChanging.Load() {
+			return nil, profile, ErrNetworkPolicyChanging
+		}
+		policyPath, epoch, err := workerNetworkEpochSnapshot()
+		if err != nil {
+			return nil, profile, err
+		}
+		self, err := os.Executable()
+		if err != nil {
+			return nil, profile, fmt.Errorf("runner: собственный бинарник для network guard не найден: %w", err)
+		}
+		inner = append([]string{
+			self, internalWorkerNetworkGuardMode, policyPath, epoch, "--",
+		}, inner...)
+	}
+
+	if proxyOnly {
+		if caps.Bwrap == "" {
+			return nil, profile, ErrNoProxyIsolation
+		}
+		socketPath, err := ensureWorkerProxyRelay(proxyRaw)
+		if err != nil {
+			return nil, profile, err
+		}
+		self, err := os.Executable()
+		if err != nil {
+			return nil, profile, fmt.Errorf("runner: собственный бинарник для proxy bridge не найден: %w", err)
+		}
+		// Bridge снаружи guard: он даёт loopback transport, а guard владеет
+		// непосредственно полезным worker и его дочерней process group.
+		inner = append([]string{self, internalWorkerProxyBridgeMode, socketPath, "--"}, inner...)
+	}
 
 	// Кто владеет временем жизни запуска: systemd-scope или процесс Бэрримора.
 	//
@@ -94,6 +187,26 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 			"--tmpfs", "/tmp",
 			// Процесс не может перехватить управляющий терминал.
 			"--new-session",
+		}
+		if proxyOnly {
+			// Главное свойство proxy-only: в namespace нет IP-маршрута к хосту
+			// или интернету, только loopback. Даже worker, игнорирующий
+			// HTTP_PROXY, физически не сможет сделать прямой TCP/UDP connect.
+			bw = append(bw,
+				"--unshare-net",
+				// Стандартные host runtime sockets (DBus, ssh-agent, Docker и
+				// подобные) не должны становиться случайным обходным каналом.
+				"--tmpfs", "/run",
+				"--tmpfs", "/var/tmp",
+			)
+			// Read-only bind корня не запрещает connect() к уже существующему
+			// файловому Unix socket. /run, /tmp и /var/tmp закрывают обычные
+			// runtime-точки, но нестандартный socket, лежащий, например, в
+			// домашнем каталоге, этим профилем пока не исключён. Не прячем
+			// ограничение за словом proxy-only: владелец должен видеть его.
+			profile.Warnings = append(profile.Warnings,
+				"proxy-only запрещает прямой IP-egress и скрывает стандартные runtime-сокеты; "+
+					"нестандартные файловые Unix-сокеты в доступном read-only дереве пока не изолированы")
 		}
 		if !ownedByScope {
 			// Умирает вместе с Бэрримором: иначе за песочницей некому следить.
@@ -130,7 +243,7 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 			}
 		}
 
-		if !plan.Sandbox.Network {
+		if !plan.Sandbox.Network && !proxyOnly {
 			bw = append(bw, "--unshare-net")
 		}
 		bw = append(bw, "--")
@@ -140,6 +253,8 @@ func buildCommand(caps Capabilities, plan worker.RunPlan, opts commandOptions) (
 		profile.ReadOnlyFS = true
 	} else if opts.AuditOnly {
 		return nil, profile, ErrNoIsolation
+	} else if proxyOnly {
+		return nil, profile, ErrNoProxyIsolation
 	} else {
 		profile.Warnings = append(profile.Warnings,
 			"bubblewrap недоступен: файловая система не ограничена изоляцией")

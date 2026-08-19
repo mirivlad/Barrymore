@@ -164,6 +164,12 @@ func (h *harness) propose(t *testing.T) delegation.Proposal {
 
 func (h *harness) approveAndStart(t *testing.T, p delegation.Proposal) delegation.WorkerRun {
 	t.Helper()
+	// Audit-only тесты действительно проверяют kernel boundary. На CI-хосте,
+	// где bubblewrap отсутствует или найденный бинарник не может создать
+	// namespace, такой тест нельзя честно превратить в обычный запуск.
+	if p.Order.AuditOnly && h.deleg.Runner().Capabilities().Bwrap == "" {
+		t.Skip("bubblewrap недоступен или неработоспособен: реальный audit-only запуск пропущен")
+	}
 	ctx := context.Background()
 	if _, err := h.deleg.Approve(ctx, p.Approval.ID, "test",
 		event.Actor{Type: event.ActorPerson}); err != nil {

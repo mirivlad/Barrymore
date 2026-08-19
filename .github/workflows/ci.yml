@@ -1,7 +1,10 @@
 # Проверка при каждом изменении.
 #
-# Только то, что не требует хоста владельца: тесты, которым нужны bubblewrap,
-# systemd или живая модель, здесь не запускаются и не притворяются пройденными.
+# CI не устанавливает системные пакеты из сети: доступность apt-зеркал не
+# должна решать, зелёный ли код. Тесты, которым нужна настоящая kernel-level
+# изоляция через bubblewrap, сами проверяют capability и честно пропускаются,
+# если GitHub-hosted runner её не предоставляет. На реальном хосте они
+# продолжают выполняться полностью.
 name: CI
 
 on:
@@ -37,12 +40,16 @@ jobs:
         run: go build -o bin/barrymored ./cmd/barrymored
 
       - name: Разбор интерфейса
-        run: node --check internal/api/web/app.js
+        run: |
+          node --check internal/api/web/app.js
+          node --check internal/api/web/surface.js
+          node --check internal/api/web/desk.js
+          node --check internal/api/web/proxy.js
 
       # Браузерная проверка проходит и без исполнителей на машине: часть про
       # поручение честно пропускается, а не считается пройденной молча.
       - name: Интерфейс в настоящем браузере
         run: |
           npm install --no-save --no-audit --no-fund playwright
-          npx playwright install --with-deps chromium
+          npx playwright install chromium
           node e2e/reception.mjs

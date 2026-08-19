@@ -20,6 +20,7 @@ import (
 	"github.com/mirivlad/barrymore/internal/initiative"
 	"github.com/mirivlad/barrymore/internal/localmodel"
 	"github.com/mirivlad/barrymore/internal/memory"
+	"github.com/mirivlad/barrymore/internal/runner"
 	"github.com/mirivlad/barrymore/internal/worker"
 )
 
@@ -48,6 +49,8 @@ func run() error {
 			"что Бэрримор записывает сам: ask, auto-safe, auto")
 		initMode = flag.String("initiative", "on",
 			"когда Бэрримор обращается первым: on, urgent-only, off")
+		workerProxy = flag.String("worker-proxy", "",
+			"прокси только для внешнего персонала: http(s)://host:port или socks5(h)://host:port")
 
 		lmModel = flag.String("local-model", "",
 			"файл .gguf локальной модели; задан — Бэрримор сам поднимает и стережёт llama-server")
@@ -114,6 +117,26 @@ func run() error {
 	*provider = pick("provider", *provider, settings.ProviderEndpoint)
 	*providerModel = pick("provider-model", *providerModel, settings.ProviderModel)
 	*providerLabel = pick("provider-label", *providerLabel, settings.ProviderLabel)
+	*workerProxy = pick("worker-proxy", *workerProxy, settings.WorkerProxy)
+
+	// Прокси персонала не становится HTTP_PROXY самого процесса. В окружении
+	// barrymored остаётся только частная переменная, которую runner превращает
+	// в стандартные proxy variables уже для конкретного worker-процесса.
+	normalizedProxy, err := runner.NormalizeWorkerProxy(*workerProxy)
+	if err != nil {
+		return err
+	}
+	*workerProxy = normalizedProxy
+	if normalizedProxy == "" {
+		_ = os.Unsetenv(runner.WorkerProxyEnv)
+	} else {
+		if err := os.Setenv(runner.WorkerProxyEnv, normalizedProxy); err != nil {
+			return fmt.Errorf("прокси персонала не установлен: %w", err)
+		}
+		// Адрес намеренно не журналируется: маршрут может раскрывать внутреннюю
+		// сеть. Для диагностики достаточно знать, что настройка включена.
+		logger.Info("прокси для внешнего персонала включён")
+	}
 
 	lm := settings.LocalModel
 	*lmModel = pick("local-model", *lmModel, lm.Path)
