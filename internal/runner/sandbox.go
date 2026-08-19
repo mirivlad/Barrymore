@@ -2,13 +2,16 @@
 //
 // ADR 0006: идентичность процесса — имя systemd-scope плюс пара
 // (pid, время старта из /proc). ADR 0007: audit-only обеспечивается
-// изоляцией ядра, а не просьбой к исполнителю.
+// изоляцией ядра, а не просьбой исполнителю.
 package runner
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 
 	"github.com/mirivlad/barrymore/internal/worker"
 )
@@ -21,12 +24,19 @@ type Capabilities struct {
 	Reasons map[string]string `json:"reasons,omitempty"`
 }
 
-// DetectCapabilities проверяет доступность bwrap и systemd-run.
+// DetectCapabilities проверяет не только наличие bwrap и systemd-run, но и
+// возможность реально использовать bubblewrap. На контейнерных/CI-хостах
+// бинарник может существовать, а создание user/network namespace быть
+// запрещено ядром или политикой хоста. Считать такую установку изоляцией нельзя.
 func DetectCapabilities() Capabilities {
 	c := Capabilities{Reasons: map[string]string{}}
 
 	if p, err := exec.LookPath("bwrap"); err == nil {
-		c.Bwrap = p
+		if probeErr := probeBubblewrap(p); probeErr == nil {
+			c.Bwrap = p
+		} else {
+			c.Reasons["bwrap"] = "найден, но пробная изоляция не работает: " + probeErr.Error()
+		}
 	} else {
 		c.Reasons["bwrap"] = "не найден в PATH: " + err.Error()
 	}
@@ -43,17 +53,47 @@ func DetectCapabilities() Capabilities {
 	return c
 }
 
+func probeBubblewrap(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Это минимальный реальный профиль из тех же примитивов, на которых
+	// строится запуск worker: read-only root, отдельные /proc и /dev,
+	// временный /tmp и отдельный network namespace. Если хотя бы один из них
+	// запрещён хостом, audit-only/proxy-only обещать нельзя.
+	cmd := exec.CommandContext(ctx, path,
+		"--ro-bind", "/", "/",
+		"--proc", "/proc",
+		"--dev", "/dev",
+		"--tmpfs", "/tmp",
+		"--unshare-net",
+		"--new-session",
+		"--", "/bin/true",
+	)
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		return fmt.Errorf("пробный запуск не завершился за 3 секунды: %w", ctx.Err())
+	}
+	if err == nil {
+		return nil
+	}
+	if detail := strings.TrimSpace(string(out)); detail != "" {
+		return fmt.Errorf("%w: %s", err, detail)
+	}
+	return err
+}
+
 // SandboxProfile — итоговое описание изоляции конкретного запуска.
 type SandboxProfile struct {
 	// Isolation — bwrap либо none.
 	Isolation string `json:"isolation"`
 	// Supervision — systemd-scope либо process-group.
-	Supervision string   `json:"supervision"`
-	ReadOnlyFS  bool     `json:"read_only_fs"`
+	Supervision string `json:"supervision"`
+	ReadOnlyFS  bool   `json:"read_only_fs"`
 	// Network означает обычный прямой network namespace хоста. При ProxyOnly
 	// он всегда false: worker видит только loopback в собственной netns.
-	Network   bool `json:"network"`
-	ProxyOnly bool `json:"proxy_only,omitempty"`
+	Network   bool     `json:"network"`
+	ProxyOnly bool     `json:"proxy_only,omitempty"`
 	Writable  []string `json:"writable"`
 	// Warnings перечисляет ослабления, о которых обязан знать владелец.
 	Warnings []string `json:"warnings,omitempty"`
