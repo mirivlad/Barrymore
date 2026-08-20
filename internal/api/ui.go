@@ -81,9 +81,11 @@ func (s *Server) ui() http.Handler {
 			_, _ = w.Write(base)
 			// Static imports are evaluated before the body of app.js. surface.js
 			// therefore installs its hydration guard before loadTalk can restore
-			// the previous turn and accidentally open the Desk on entry.
+			// the previous turn and accidentally open the Desk on entry. feedback.js
+			// observes the same message responses without making feedback domain state
+			// a browser concern.
 			_, _ = w.Write([]byte(
-				"\nimport \"/surface.js\";\nimport \"/language.js\";\nimport \"/presence.js\";\nimport \"/desk.js\";\nimport \"/proxy.js\";\n"))
+				"\nimport \"/surface.js\";\nimport \"/language.js\";\nimport \"/presence.js\";\nimport \"/desk.js\";\nimport \"/proxy.js\";\nimport \"/feedback.js\";\n"))
 			return
 		}
 
