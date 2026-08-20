@@ -61,11 +61,11 @@ func applyMessage(ctx context.Context, tx *sql.Tx, m Message) error {
 	trace, _ := json.Marshal(orEmpty(m.RetrievalTrace))
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO messages (id, conversation_id, thread_id, role, content, provider, model,
-		                      prompt_tokens, output_tokens, latency_ms, retrieval_trace, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                      prompt_tokens, output_tokens, latency_ms, episode_id, retrieval_trace, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (id) DO NOTHING`,
 		m.ID, m.ConversationID, nullable(m.ThreadID), m.Role, m.Content, m.Provider, m.Model,
-		m.PromptTokens, m.OutputTokens, m.LatencyMS, string(trace), ts(m.CreatedAt))
+		m.PromptTokens, m.OutputTokens, m.LatencyMS, m.EpisodeID, string(trace), ts(m.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("проекция сообщения %s: %w", m.ID, err)
 	}
@@ -151,10 +151,16 @@ func (s *Service) Messages(ctx context.Context, conversationID string, limit int
 		limit = 100
 	}
 	rows, err := s.db.Reader().QueryContext(ctx, `
-		SELECT id, conversation_id, COALESCE(thread_id, ''), role, content, provider, model,
-		       prompt_tokens, output_tokens, latency_ms, retrieval_trace, created_at
-		  FROM messages WHERE conversation_id = ?
-		 ORDER BY created_at DESC, id DESC LIMIT ?`, conversationID, limit)
+		SELECT m.id, m.conversation_id, COALESCE(m.thread_id, ''), m.role, m.content, m.provider, m.model,
+		       m.prompt_tokens, m.output_tokens, m.latency_ms, m.episode_id,
+		       COALESCE((
+		           SELECT f.value FROM experience_feedback f
+		            WHERE f.episode_id = m.episode_id
+		            ORDER BY f.created_at DESC, f.id DESC LIMIT 1
+		       ), ''),
+		       m.retrieval_trace, m.created_at
+		  FROM messages m WHERE m.conversation_id = ?
+		 ORDER BY m.created_at DESC, m.id DESC LIMIT ?`, conversationID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("чтение сообщений %s: %w", conversationID, err)
 	}
@@ -169,7 +175,7 @@ func (s *Service) Messages(ctx context.Context, conversationID string, limit int
 		)
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ThreadID, &m.Role, &m.Content,
 			&m.Provider, &m.Model, &m.PromptTokens, &m.OutputTokens, &m.LatencyMS,
-			&trace, &createdAt); err != nil {
+			&m.EpisodeID, &m.Feedback, &trace, &createdAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(trace), &m.RetrievalTrace)
