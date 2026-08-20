@@ -60,7 +60,8 @@ func (s *Service) recallContext(ctx context.Context, question string) ([]Context
 				if ep.Result != "" {
 					b.WriteString("; тогда результат: " + ep.Result)
 				}
-				if summary := feedbackSummary(e.Feedback); summary != "" {
+				current, _ := s.experience.CurrentFeedback(ctx, ep.ID)
+				if summary := feedbackSummary(e.Feedback, current); summary != "" {
 					b.WriteString("; " + summary)
 				}
 				b.WriteString("\n")
@@ -79,7 +80,8 @@ func (s *Service) recallContext(ctx context.Context, question string) ([]Context
 					proc.ID, proc.Title, proc.RiskClass, proc.Succeeded, proc.Failed))
 				if proc.SourceEpisodeID != "" {
 					if fbs, err := s.experience.Feedback(ctx, proc.SourceEpisodeID); err == nil {
-						if summary := feedbackSummary(fbs); summary != "" {
+						current, _ := s.experience.CurrentFeedback(ctx, proc.SourceEpisodeID)
+						if summary := feedbackSummary(fbs, current); summary != "" {
 							b.WriteString("; source_" + summary)
 						}
 					}
@@ -104,8 +106,8 @@ func (s *Service) recallContext(ctx context.Context, question string) ([]Context
 	return sections, trace, nil
 }
 
-func feedbackSummary(items []experience.Feedback) string {
-	if len(items) == 0 {
+func feedbackSummary(items []experience.Feedback, current *experience.Feedback) string {
+	if len(items) == 0 || current == nil {
 		return ""
 	}
 	likes, dislikes := 0, 0
@@ -117,12 +119,11 @@ func feedbackSummary(items []experience.Feedback) string {
 			dislikes++
 		}
 	}
-	current := items[len(items)-1].Value
 	if len(items) == 1 {
-		return "current_feedback=" + current
+		return "current_feedback=" + current.Value
 	}
 	return fmt.Sprintf("current_feedback=%s; feedback_history like=%d dislike=%d",
-		current, likes, dislikes)
+		current.Value, likes, dislikes)
 }
 
 // Keep the memory import explicit: recallContext is the boundary that combines
