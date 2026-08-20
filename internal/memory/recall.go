@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -56,11 +55,9 @@ func (s *Service) Recall(ctx context.Context, question string, limit int) ([]Rec
 
 	out := []RecallItem{}
 	for rows.Next() {
-		var (
-			r                         RecallItem
-			provenance                string
-			verified, valid, created  string
-		)
+		var r RecallItem
+		var provenance string
+		var verified, valid, created string
 		if err := rows.Scan(&r.ID, &r.Type, &r.Content, &provenance, &r.ThreadID,
 			&r.Sensitivity, &r.Confidence, &r.Stability, &verified,
 			&valid, &created, &r.Rank); err != nil {
@@ -85,7 +82,7 @@ func (s *Service) Recall(ctx context.Context, question string, limit int) ([]Rec
 		}
 		out = append(out, r)
 	}
-	if err := rows.Err(); err != nil && err != sql.ErrNoRows {
+	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	return out, nil
