@@ -12,11 +12,13 @@ import (
 
 	"github.com/mirivlad/barrymore/internal/clock"
 	"github.com/mirivlad/barrymore/internal/event"
+	"github.com/mirivlad/barrymore/internal/experience"
 	"github.com/mirivlad/barrymore/internal/ids"
 	"github.com/mirivlad/barrymore/internal/learning"
 	"github.com/mirivlad/barrymore/internal/memory"
 	"github.com/mirivlad/barrymore/internal/model"
 	"github.com/mirivlad/barrymore/internal/projection"
+	"github.com/mirivlad/barrymore/internal/research"
 	"github.com/mirivlad/barrymore/internal/runtime"
 	"github.com/mirivlad/barrymore/internal/skill"
 	"github.com/mirivlad/barrymore/internal/store"
@@ -34,17 +36,19 @@ var ErrNotFound = errors.New("разговор не найден")
 
 // Service ведёт разговор.
 type Service struct {
-	db        *store.DB
-	journal   *event.Journal
-	clock     clock.Clock
-	provider  model.Provider
-	threads   *thread.Service
-	memory    *memory.Service
-	rt        *runtime.Runtime
-	skills    SkillCatalog
-	practices PracticeCatalog
-	identity  Identity
-	log       *slog.Logger
+	db         *store.DB
+	journal    *event.Journal
+	clock      clock.Clock
+	provider   model.Provider
+	threads    *thread.Service
+	memory     *memory.Service
+	experience *experience.Service
+	research   *research.Registry
+	rt         *runtime.Runtime
+	skills     SkillCatalog
+	practices  PracticeCatalog
+	identity   Identity
+	log        *slog.Logger
 
 	// maxHistory ограничивает, сколько прошлых реплик уходит в модель.
 	maxHistory int
@@ -60,6 +64,8 @@ type Config struct {
 	Provider   model.Provider
 	Threads    *thread.Service
 	Memory     *memory.Service
+	Experience *experience.Service
+	Research   *research.Registry
 	Runtime    *runtime.Runtime
 	Skills     SkillCatalog
 	Practices  PracticeCatalog
@@ -83,14 +89,32 @@ func New(cfg Config) *Service {
 	if cfg.Identity.Name == "" {
 		cfg.Identity = DefaultIdentity()
 	}
+	if cfg.Experience == nil && cfg.DB != nil && cfg.Journal != nil {
+		cfg.Experience = experience.New(cfg.DB, cfg.Journal, cfg.Clock)
+	}
+	if cfg.Research == nil {
+		cfg.Research = research.New()
+		if err := research.RegisterProviderInspector(cfg.Research, cfg.Provider, cfg.Clock); err != nil {
+			cfg.Logger.Error("research capability провайдера не зарегистрирована", "error", err)
+		}
+	}
 	return &Service{
 		db: cfg.DB, journal: cfg.Journal, clock: cfg.Clock, provider: cfg.Provider,
-		threads: cfg.Threads, memory: cfg.Memory, rt: cfg.Runtime,
+		threads: cfg.Threads, memory: cfg.Memory, experience: cfg.Experience,
+		research: cfg.Research, rt: cfg.Runtime,
 		skills: cfg.Skills, practices: cfg.Practices,
 		identity: cfg.Identity, log: cfg.Logger,
 		maxHistory: cfg.MaxHistory, maxTokens: cfg.MaxTokens,
 	}
 }
+
+// Experience возвращает долговечный опыт, которым владеет разговорный контур.
+// API использует этот же экземпляр для feedback: второй сервис поверх той же
+// базы был бы работоспособен, но скрывал бы реальную границу владения.
+func (s *Service) Experience() *experience.Service { return s.experience }
+
+// Research возвращает каталог безопасных read-only исследований.
+func (s *Service) Research() *research.Registry { return s.research }
 
 // SkillCatalog перечисляет то, что Бэрримор умеет сам.
 //
@@ -705,6 +729,9 @@ func (s *Service) Projections(reg *projection.Registry) {
 	// Предложение — запись аудита: состояние меняют кандидаты и позиции,
 	// у которых собственные события.
 	reg.OnAudit(EvProposalReceived)
+	if s.experience != nil {
+		s.experience.Projections(reg)
+	}
 }
 
 func ts(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
