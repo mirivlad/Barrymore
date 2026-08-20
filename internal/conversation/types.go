@@ -38,6 +38,12 @@ type Message struct {
 	PromptTokens   int    `json:"prompt_tokens,omitempty"`
 	OutputTokens   int    `json:"output_tokens,omitempty"`
 	LatencyMS      int64  `json:"latency_ms,omitempty"`
+	// EpisodeID связывает финальную реплику с единицей опыта, которую можно
+	// явно оценить. Старые сообщения до появления Episode остаются без связи.
+	EpisodeID string `json:"episode_id,omitempty"`
+	// Feedback — последняя явная оценка владельца для Episode. Это read-model
+	// поле: в событие сообщения оно не обязано попадать и не является фактом.
+	Feedback string `json:"feedback,omitempty"`
 	// RetrievalTrace показывает, что именно было подано модели.
 	// Без него нельзя понять, почему она ответила так, а не иначе.
 	RetrievalTrace []string  `json:"retrieval_trace,omitempty"`
@@ -151,11 +157,12 @@ type Turn struct {
 	Reply            Message             `json:"reply"`
 	Proposal         Proposal            `json:"proposal"`
 	MemoryCandidates []MemoryCandidateID `json:"memory_candidates"`
-	// EpisodeID заполнен, если перед финальным ответом был исследовательский
-	// эпизод. Он нужен для аудита и явной оценки владельца.
-	EpisodeID string `json:"episode_id,omitempty"`
-	Thread    ThreadOutcome `json:"thread"`
-	OwnActions []OwnAction `json:"own_actions,omitempty"`
+	// EpisodeID — единица опыта завершённого ответа. Она есть и когда Research
+	// не потребовался: тогда технический outcome остаётся unknown, пока не было
+	// объективной проверки; пользовательский feedback хранится отдельно.
+	EpisodeID  string        `json:"episode_id,omitempty"`
+	Thread     ThreadOutcome `json:"thread"`
+	OwnActions []OwnAction   `json:"own_actions,omitempty"`
 }
 
 // OwnAction — проверенное предложение применить умение.
@@ -170,12 +177,12 @@ type OwnAction struct {
 
 // ThreadOutcome — судьба нити после хода.
 type ThreadOutcome struct {
-	ThreadID string `json:"thread_id,omitempty"`
-	Title    string `json:"title,omitempty"`
-	Attached bool   `json:"attached,omitempty"`
-	Why      string `json:"why,omitempty"`
+	ThreadID string             `json:"thread_id,omitempty"`
+	Title    string             `json:"title,omitempty"`
+	Attached bool               `json:"attached,omitempty"`
+	Why      string             `json:"why,omitempty"`
 	Proposed *NewThreadProposal `json:"proposed,omitempty"`
-	Refused string `json:"refused,omitempty"`
+	Refused  string             `json:"refused,omitempty"`
 }
 
 // NewThreadProposal — предложение завести нить, готовое к одному нажатию.
