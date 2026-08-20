@@ -4,6 +4,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"strings"
 )
 
 //go:embed web/*
@@ -46,6 +47,22 @@ func (s *Server) ui() http.Handler {
 				return
 			}
 			s.deskAmbient(w, r)
+			return
+		}
+
+		// Explicit feedback belongs to the owner-facing surface. The episode ID
+		// is the durable learning unit; message text is never posted back as an
+		// authority for what Barrymore said.
+		const episodePrefix = "/api/v1/episodes/"
+		const feedbackSuffix = "/feedback"
+		if strings.HasPrefix(r.URL.Path, episodePrefix) && strings.HasSuffix(r.URL.Path, feedbackSuffix) {
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, episodePrefix), feedbackSuffix)
+			id = strings.Trim(id, "/")
+			if id == "" || strings.Contains(id, "/") {
+				writeProblem(w, http.StatusNotFound, "эпизод не найден", "некорректный идентификатор эпизода")
+				return
+			}
+			s.experienceFeedback(w, r, id)
 			return
 		}
 
