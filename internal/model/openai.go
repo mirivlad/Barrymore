@@ -1,14 +1,17 @@
 package model
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // OpenAICompatible — провайдер с интерфейсом OpenAI /v1/chat/completions.
@@ -113,15 +116,20 @@ func (p *OpenAICompatible) Probe(ctx context.Context) Status {
 }
 
 type chatRequest struct {
-	Model          string      `json:"model"`
-	Messages       []Message   `json:"messages"`
-	MaxTokens      int         `json:"max_tokens,omitempty"`
-	Temperature    float64     `json:"temperature"`
-	Stream         bool        `json:"stream"`
-	ResponseFormat *respFormat `json:"response_format,omitempty"`
+	Model          string         `json:"model"`
+	Messages       []Message      `json:"messages"`
+	MaxTokens      int            `json:"max_tokens,omitempty"`
+	Temperature    float64        `json:"temperature"`
+	Stream         bool           `json:"stream"`
+	StreamOptions  *streamOptions `json:"stream_options,omitempty"`
+	ResponseFormat *respFormat    `json:"response_format,omitempty"`
 	// ChatTemplateKwargs понимают llama-server и совместимые серверы.
 	// Незнакомый провайдер поле проигнорирует.
 	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
+}
+
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type respFormat struct {
@@ -157,6 +165,30 @@ type chatResponse struct {
 	} `json:"error"`
 }
 
+type chatStreamResponse struct {
+	Model   string `json:"model"`
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+		FinishReason *string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+	Timings struct {
+		PromptMS           float64 `json:"prompt_ms"`
+		PredictedMS        float64 `json:"predicted_ms"`
+		PromptPerSecond    float64 `json:"prompt_per_second"`
+		PredictedPerSecond float64 `json:"predicted_per_second"`
+	} `json:"timings"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+	} `json:"error"`
+}
+
 // Complete выполняет запрос к модели.
 //
 // При заданной схеме используется structured output: провайдер принуждает
@@ -166,29 +198,7 @@ func (p *OpenAICompatible) Complete(ctx context.Context, req Request) (Response,
 		return Response{}, fmt.Errorf("провайдер модели не настроен")
 	}
 
-	msgs := make([]Message, 0, len(req.Messages)+1)
-	if req.System != "" {
-		msgs = append(msgs, Message{Role: RoleSystem, Content: req.System})
-	}
-	msgs = append(msgs, req.Messages...)
-
-	body := chatRequest{
-		Model: p.Model, Messages: msgs, MaxTokens: req.MaxTokens,
-		Temperature: req.Temperature, Stream: false,
-	}
-	if req.DisableThinking {
-		body.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
-	}
-	if len(req.Schema) > 0 {
-		name := req.SchemaName
-		if name == "" {
-			name = "response"
-		}
-		body.ResponseFormat = &respFormat{
-			Type:       "json_schema",
-			JSONSchema: &schemaWrapper{Name: name, Strict: true, Schema: req.Schema},
-		}
-	}
+	body := p.chatRequest(req, false)
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -250,6 +260,169 @@ func (p *OpenAICompatible) Complete(ctx context.Context, req Request) (Response,
 		FinishReason:     cr.Choices[0].FinishReason,
 		Latency:          p.now().Sub(started),
 	}, nil
+}
+
+// CompleteStream privately assembles an OpenAI-compatible SSE response. The
+// callback receives counters only; JSON fragments never cross this boundary.
+func (p *OpenAICompatible) CompleteStream(ctx context.Context, req Request,
+	onProgress func(Progress)) (Response, error) {
+	if p.Endpoint == "" {
+		return Response{}, fmt.Errorf("провайдер модели не настроен")
+	}
+
+	body := p.chatRequest(req, true)
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return Response{}, fmt.Errorf("сериализация запроса к модели: %w", err)
+	}
+	callCtx, cancel := context.WithTimeout(ctx, p.Timeout)
+	defer cancel()
+	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost,
+		p.Endpoint+"/v1/chat/completions", bytes.NewReader(payload))
+	if err != nil {
+		return Response{}, fmt.Errorf("запрос к модели: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	p.auth(httpReq)
+
+	started := p.now()
+	resp, err := p.client.Do(httpReq)
+	if err != nil {
+		return Response{}, fmt.Errorf("провайдер модели не ответил: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return Response{}, fmt.Errorf("провайдер модели ответил %d: %s",
+			resp.StatusCode, truncate(string(raw), 400))
+	}
+
+	const maxResponseBytes = 16 << 20
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64<<10), maxResponseBytes)
+	var content strings.Builder
+	outputRunes := 0
+	var result Response
+	var dataLines []string
+	done := false
+	consume := func() error {
+		if len(dataLines) == 0 {
+			return nil
+		}
+		data := strings.Join(dataLines, "\n")
+		dataLines = dataLines[:0]
+		if data == "[DONE]" {
+			done = true
+			return nil
+		}
+		var chunk chatStreamResponse
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			return fmt.Errorf("разбор stream ответа модели: %w", err)
+		}
+		if chunk.Error != nil {
+			return fmt.Errorf("провайдер модели вернул ошибку: %s", chunk.Error.Message)
+		}
+		if chunk.Model != "" {
+			result.Model = chunk.Model
+		}
+		for _, choice := range chunk.Choices {
+			if content.Len()+len(choice.Delta.Content) > maxResponseBytes {
+				return fmt.Errorf("stream ответ модели превышает %d байт", maxResponseBytes)
+			}
+			if choice.Delta.Content != "" {
+				content.WriteString(choice.Delta.Content)
+				outputRunes += utf8.RuneCountInString(choice.Delta.Content)
+				if onProgress != nil {
+					onProgress(Progress{
+						OutputUnits: (outputRunes + 3) / 4,
+						Elapsed:     p.now().Sub(started),
+					})
+				}
+			}
+			if choice.FinishReason != nil {
+				result.FinishReason = *choice.FinishReason
+			}
+		}
+		if chunk.Usage.PromptTokens != 0 || chunk.Usage.CompletionTokens != 0 {
+			result.PromptTokens = chunk.Usage.PromptTokens
+			result.CompletionTokens = chunk.Usage.CompletionTokens
+		}
+		if chunk.Timings.PromptMS > 0 {
+			result.PromptDuration = durationFromMilliseconds(chunk.Timings.PromptMS)
+		}
+		if chunk.Timings.PredictedMS > 0 {
+			result.GenerationDuration = durationFromMilliseconds(chunk.Timings.PredictedMS)
+		}
+		result.PromptTokensPerSecond = chunk.Timings.PromptPerSecond
+		result.GenerationTokensPerSecond = chunk.Timings.PredictedPerSecond
+		return nil
+	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			if err := consume(); err != nil {
+				return Response{}, err
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "data:") {
+			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return Response{}, fmt.Errorf("чтение stream ответа модели: %w", err)
+	}
+	if err := consume(); err != nil {
+		return Response{}, err
+	}
+	if !done {
+		return Response{}, fmt.Errorf("stream ответа модели завершён без [DONE]")
+	}
+	result.Content = content.String()
+	result.Latency = p.now().Sub(started)
+	if strings.TrimSpace(result.Content) == "" && result.FinishReason == "length" {
+		return Response{}, fmt.Errorf(
+			"модель израсходовала бюджет ответа на скрытое рассуждение и не дала ответа; " +
+				"увеличьте предел токенов или отключите рассуждения")
+	}
+	if strings.TrimSpace(result.Content) == "" {
+		return Response{}, fmt.Errorf("провайдер модели вернул пустой ответ")
+	}
+	return result, nil
+}
+
+func (p *OpenAICompatible) chatRequest(req Request, stream bool) chatRequest {
+	msgs := make([]Message, 0, len(req.Messages)+1)
+	if req.System != "" {
+		msgs = append(msgs, Message{Role: RoleSystem, Content: req.System})
+	}
+	msgs = append(msgs, req.Messages...)
+	body := chatRequest{
+		Model: p.Model, Messages: msgs, MaxTokens: req.MaxTokens,
+		Temperature: req.Temperature, Stream: stream,
+	}
+	if stream {
+		body.StreamOptions = &streamOptions{IncludeUsage: true}
+	}
+	if req.DisableThinking {
+		body.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
+	}
+	if len(req.Schema) > 0 {
+		name := req.SchemaName
+		if name == "" {
+			name = "response"
+		}
+		body.ResponseFormat = &respFormat{
+			Type:       "json_schema",
+			JSONSchema: &schemaWrapper{Name: name, Strict: true, Schema: req.Schema},
+		}
+	}
+	return body
+}
+
+func durationFromMilliseconds(ms float64) time.Duration {
+	return time.Duration(math.Round(ms * float64(time.Millisecond)))
 }
 
 // auth добавляет ключ, если он задан. Значение нигде не журналируется.

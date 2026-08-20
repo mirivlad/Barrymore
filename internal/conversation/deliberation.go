@@ -27,7 +27,7 @@ type deliberationResult struct {
 // answer or exhausts a small read-only research budget. Intermediate model
 // replies are never shown or persisted as conversation messages.
 func (s *Service) deliberate(ctx context.Context, conv Conversation, question string,
-	base []ContextSection, history []model.Message) (deliberationResult, error) {
+	base []ContextSection, history []model.Message, reporter *turnReporter) (deliberationResult, error) {
 
 	sections := append([]ContextSection(nil), base...)
 	var aggregate model.Response
@@ -52,7 +52,8 @@ func (s *Service) deliberate(ctx context.Context, conv Conversation, question st
 			})
 		}
 
-		resp, proposal, err := s.completeProposal(ctx, callSections, history)
+		resp, proposal, err := s.completeProposal(ctx, callSections, history, reporter,
+			aggregate.CompletionTokens)
 		aggregateResponse(&aggregate, resp)
 		if err != nil {
 			return deliberationResult{}, err
@@ -81,6 +82,9 @@ func (s *Service) deliberate(ctx context.Context, conv Conversation, question st
 
 		if s.research == nil {
 			return deliberationResult{}, fmt.Errorf("модель запросила исследование %q, но research runtime не настроен", capID)
+		}
+		if err := reporter.stage(ctx, StageResearch, "Выбираю способ проверки"); err != nil {
+			return deliberationResult{}, err
 		}
 		if episode == nil {
 			initial, _ := json.Marshal(map[string]any{"question": question, "kind": "research"})
@@ -125,6 +129,9 @@ func (s *Service) deliberate(ctx context.Context, conv Conversation, question st
 		seen[key] = true
 		steps = append(steps, step)
 
+		if err := reporter.stage(ctx, StageCapability, s.researchStageLabel(capID)); err != nil {
+			return deliberationResult{}, err
+		}
 		res, err := s.research.Execute(ctx, research.Request{
 			CapabilityID: capID, Args: args, Why: proposal.Research.Why,
 		})
@@ -150,7 +157,7 @@ func (s *Service) deliberate(ctx context.Context, conv Conversation, question st
 }
 
 func (s *Service) completeProposal(ctx context.Context, sections []ContextSection,
-	history []model.Message) (model.Response, Proposal, error) {
+	history []model.Message, reporter *turnReporter, completedOutput int) (model.Response, Proposal, error) {
 
 	req := model.Request{
 		System:          s.identity.SystemPrompt(sections, s.clock.Now()),
@@ -161,9 +168,27 @@ func (s *Service) completeProposal(ctx context.Context, sections []ContextSectio
 		Temperature:     0.3,
 		DisableThinking: true,
 	}
-	resp, err := s.provider.Complete(ctx, req)
+	if err := reporter.stage(ctx, StageProviderPrompt, "Готовлю запрос к модели"); err != nil {
+		return model.Response{}, Proposal{}, err
+	}
+	if err := reporter.stage(ctx, StageProviderGeneration, "Формирую ответ"); err != nil {
+		return model.Response{}, Proposal{}, err
+	}
+	reporter.beginGeneration()
+	var resp model.Response
+	var err error
+	if streaming, ok := s.provider.(model.StreamingProvider); ok {
+		resp, err = streaming.CompleteStream(ctx, req, func(progress model.Progress) {
+			reporter.generation(progress, completedOutput)
+		})
+	} else {
+		resp, err = s.provider.Complete(ctx, req)
+	}
 	if err != nil {
 		return model.Response{}, Proposal{}, fmt.Errorf("модель не ответила: %w", err)
+	}
+	if err := reporter.stage(ctx, StageVerification, "Проверяю ответ модели"); err != nil {
+		return model.Response{}, Proposal{}, err
 	}
 	proposal, err := parseProposal(resp.Content)
 	if err != nil {
@@ -179,6 +204,23 @@ func aggregateResponse(dst *model.Response, src model.Response) {
 	dst.PromptTokens += src.PromptTokens
 	dst.CompletionTokens += src.CompletionTokens
 	dst.Latency += src.Latency
+	dst.PromptDuration += src.PromptDuration
+	dst.GenerationDuration += src.GenerationDuration
+	if dst.PromptDuration > 0 {
+		dst.PromptTokensPerSecond = float64(dst.PromptTokens) / dst.PromptDuration.Seconds()
+	}
+	if dst.GenerationDuration > 0 {
+		dst.GenerationTokensPerSecond = float64(dst.CompletionTokens) / dst.GenerationDuration.Seconds()
+	}
+}
+
+func (s *Service) researchStageLabel(capabilityID string) string {
+	for _, capability := range s.research.Catalog() {
+		if capability.ID == capabilityID {
+			return capability.Title
+		}
+	}
+	return "Проверяю доступное evidence"
 }
 
 func researchResultSection(res research.Result) ContextSection {

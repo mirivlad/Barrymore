@@ -42,6 +42,7 @@ type Service struct {
 	practices  PracticeCatalog
 	identity   Identity
 	log        *slog.Logger
+	progress   *ProgressBroker
 	maxHistory int
 	maxTokens  int
 }
@@ -60,6 +61,7 @@ type Config struct {
 	Practices  PracticeCatalog
 	Identity   Identity
 	Logger     *slog.Logger
+	Progress   *ProgressBroker
 	MaxHistory int
 	MaxTokens  int
 }
@@ -77,6 +79,9 @@ func New(cfg Config) *Service {
 	if cfg.Identity.Name == "" {
 		cfg.Identity = DefaultIdentity()
 	}
+	if cfg.Progress == nil {
+		cfg.Progress = NewProgressBroker()
+	}
 	if cfg.Experience == nil && cfg.DB != nil && cfg.Journal != nil {
 		cfg.Experience = experience.New(cfg.DB, cfg.Journal, cfg.Clock)
 	}
@@ -92,12 +97,14 @@ func New(cfg Config) *Service {
 		research: cfg.Research, rt: cfg.Runtime,
 		skills: cfg.Skills, practices: cfg.Practices,
 		identity: cfg.Identity, log: cfg.Logger,
+		progress:   cfg.Progress,
 		maxHistory: cfg.MaxHistory, maxTokens: cfg.MaxTokens,
 	}
 }
 
 func (s *Service) Experience() *experience.Service { return s.experience }
 func (s *Service) Research() *research.Registry    { return s.research }
+func (s *Service) Progress() *ProgressBroker       { return s.progress }
 
 type SkillCatalog interface {
 	Live() []skill.Skill
@@ -164,22 +171,29 @@ func (s *Service) Send(ctx context.Context, conversationID, text string) (Turn, 
 }
 
 func (s *Service) executeRecordedTurn(ctx context.Context, conv Conversation, text string,
-	userMsg Message) (Turn, error) {
+	userMsg Message, reporter *turnReporter) (Turn, error) {
 	sections, trace, offered, err := s.buildContext(ctx, conv, text)
 	if err != nil {
+		return Turn{}, err
+	}
+	if err := reporter.stage(ctx, StageContext, "Собираю контекст разговора"); err != nil {
 		return Turn{}, err
 	}
 	history, err := s.history(ctx, conv.ID)
 	if err != nil {
 		return Turn{}, err
 	}
-	deliberated, err := s.deliberate(ctx, conv, text, sections, history)
+	deliberated, err := s.deliberate(ctx, conv, text, sections, history, reporter)
 	if err != nil {
 		return Turn{}, err
 	}
 	proposal := deliberated.Proposal
 	resp := deliberated.Response
+	reporter.response = resp
 	trace = append(trace, deliberated.Trace...)
+	if err := reporter.stage(ctx, StageFinalization, "Сохраняю проверенный ответ"); err != nil {
+		return Turn{}, err
+	}
 
 	replyMsg, err := s.record(ctx, conv, Message{
 		ConversationID: conv.ID, ThreadID: conv.ThreadID,

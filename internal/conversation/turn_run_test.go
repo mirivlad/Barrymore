@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mirivlad/barrymore/internal/conversation"
 	"github.com/mirivlad/barrymore/internal/event"
@@ -14,6 +15,45 @@ import (
 	"github.com/mirivlad/barrymore/internal/testsupport"
 	"github.com/mirivlad/barrymore/internal/thread"
 )
+
+type blockingStreamingProvider struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingStreamingProvider) ID() string       { return "streaming" }
+func (p *blockingStreamingProvider) Describe() string { return "streaming test provider" }
+func (p *blockingStreamingProvider) Probe(context.Context) model.Status {
+	return model.Status{Status: model.StatusReady, SupportsSchema: true}
+}
+func (p *blockingStreamingProvider) Complete(context.Context, model.Request) (model.Response, error) {
+	return model.Response{}, errors.New("non-streaming fallback used")
+}
+func (p *blockingStreamingProvider) CompleteStream(ctx context.Context, _ model.Request,
+	onProgress func(model.Progress)) (model.Response, error) {
+	onProgress(model.Progress{OutputUnits: 8, Elapsed: 2 * time.Second})
+	close(p.entered)
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return model.Response{}, ctx.Err()
+	}
+	return model.Response{
+		Content: `{
+			"reply":"Готово из stream.",
+			"research":{"capability_id":"","args":{},"why":"данных достаточно"},
+			"thread_match":null,
+			"thread_state":null,
+			"memory_candidates":[],
+			"own_actions":[],
+			"work_order_proposals":[],
+			"open_questions":[]
+		}`,
+		Model: "stream-model", PromptTokens: 12, CompletionTokens: 4,
+		PromptDuration: 100 * time.Millisecond, GenerationDuration: 500 * time.Millisecond,
+		PromptTokensPerSecond: 120, GenerationTokensPerSecond: 8,
+	}, nil
+}
 
 type finalProvider struct{}
 
@@ -180,5 +220,69 @@ func TestInterruptUnfinishedTurnSurvivesProjectionRebuild(t *testing.T) {
 	}
 	if _, err := talk.ActiveTurn(ctx, conv.ID); !errors.Is(err, conversation.ErrNoActiveTurn) {
 		t.Fatalf("active after recovery=%v", err)
+	}
+}
+
+func TestExecuteTurnUsesPrivateStreamingProgressAndPersistsExactTelemetry(t *testing.T) {
+	provider := &blockingStreamingProvider{entered: make(chan struct{}), release: make(chan struct{})}
+	ctx := context.Background()
+	db := testsupport.OpenDBAt(t, filepath.Join(t.TempDir(), "barrymore.db"))
+	clk := testsupport.Clock()
+	journal := event.NewJournal(db, clk)
+	threads := thread.NewService(db, journal, clk)
+	talk := conversation.New(conversation.Config{
+		DB: db, Journal: journal, Clock: clk, Provider: provider,
+		Threads: threads, Logger: testsupport.Logger(t),
+	})
+	conv, err := talk.Start(ctx, "", "stream progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	queued, err := talk.BeginTurn(ctx, conv.ID, "Ответь потоково")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := make(chan struct {
+		run conversation.TurnRun
+		err error
+	}, 1)
+	go func() {
+		run, err := talk.ExecuteTurn(ctx, queued.ID)
+		result <- struct {
+			run conversation.TurnRun
+			err error
+		}{run: run, err: err}
+	}()
+
+	select {
+	case <-provider.entered:
+	case <-time.After(time.Second):
+		t.Fatal("streaming provider was not used")
+	}
+	progress, ok := talk.Progress().Latest(queued.ID)
+	if !ok || progress.Stage != conversation.StageProviderGeneration ||
+		progress.OutputTokens != 8 || !progress.Approximate {
+		t.Fatalf("live progress=%+v ok=%v", progress, ok)
+	}
+	close(provider.release)
+
+	var completed conversation.TurnRun
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		completed = got.run
+	case <-time.After(time.Second):
+		t.Fatal("turn did not complete")
+	}
+	if completed.PromptTokens != 12 || completed.OutputTokens != 4 ||
+		completed.PromptMS != 100 || completed.GenerationMS != 500 ||
+		completed.PromptTokensPerSecond != 120 || completed.GenerationTokensPerSecond != 8 {
+		t.Fatalf("exact telemetry=%+v", completed)
+	}
+	if _, ok := talk.Progress().Latest(queued.ID); ok {
+		t.Fatal("completed turn kept ephemeral progress")
 	}
 }

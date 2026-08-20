@@ -46,12 +46,23 @@ type Request struct {
 
 // Response — ответ модели.
 type Response struct {
-	Content          string        `json:"content"`
-	Model            string        `json:"model"`
-	PromptTokens     int           `json:"prompt_tokens"`
-	CompletionTokens int           `json:"completion_tokens"`
-	FinishReason     string        `json:"finish_reason"`
-	Latency          time.Duration `json:"latency"`
+	Content                   string        `json:"content"`
+	Model                     string        `json:"model"`
+	PromptTokens              int           `json:"prompt_tokens"`
+	CompletionTokens          int           `json:"completion_tokens"`
+	FinishReason              string        `json:"finish_reason"`
+	Latency                   time.Duration `json:"latency"`
+	PromptDuration            time.Duration `json:"prompt_duration,omitempty"`
+	GenerationDuration        time.Duration `json:"generation_duration,omitempty"`
+	PromptTokensPerSecond     float64       `json:"prompt_tokens_per_second,omitempty"`
+	GenerationTokensPerSecond float64       `json:"generation_tokens_per_second,omitempty"`
+}
+
+// Progress contains only safe, approximate generation telemetry. Partial model
+// content is intentionally absent: structured JSON is private until validation.
+type Progress struct {
+	OutputUnits int           `json:"output_units"`
+	Elapsed     time.Duration `json:"elapsed"`
 }
 
 // Статусы провайдера.
@@ -89,4 +100,11 @@ type Provider interface {
 	Probe(ctx context.Context) Status
 	// Complete выполняет запрос.
 	Complete(ctx context.Context, req Request) (Response, error)
+}
+
+// StreamingProvider is optional. Runtime falls back to Provider.Complete when
+// a provider cannot expose private streaming telemetry.
+type StreamingProvider interface {
+	Provider
+	CompleteStream(ctx context.Context, req Request, onProgress func(Progress)) (Response, error)
 }

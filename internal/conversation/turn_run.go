@@ -156,8 +156,10 @@ func (s *Service) ExecuteTurn(ctx context.Context, turnID string) (TurnRun, erro
 	if err := s.writeTurnRun(ctx, run, EvTurnStarted); err != nil {
 		return run, err
 	}
+	reporter := &turnReporter{service: s, run: &run, started: started}
+	reporter.publish(run.Stage, run.StageLabel, 0, 0, false, 0)
 
-	turn, executeErr := s.executeRecordedTurn(ctx, conv, userMsg.Content, userMsg)
+	turn, executeErr := s.executeRecordedTurn(ctx, conv, userMsg.Content, userMsg, reporter)
 	finished := s.clock.Now()
 	run.UpdatedAt = finished
 	run.FinishedAt = &finished
@@ -169,6 +171,7 @@ func (s *Service) ExecuteTurn(ctx context.Context, turnID string) (TurnRun, erro
 		if err := s.writeTurnRun(ctx, run, EvTurnFailed); err != nil {
 			return run, errors.Join(executeErr, err)
 		}
+		s.progress.Forget(run.ID)
 		return run, executeErr
 	}
 
@@ -180,10 +183,15 @@ func (s *Service) ExecuteTurn(ctx context.Context, turnID string) (TurnRun, erro
 	run.Model = turn.Reply.Model
 	run.PromptTokens = turn.Reply.PromptTokens
 	run.OutputTokens = turn.Reply.OutputTokens
+	run.PromptMS = float64(reporter.response.PromptDuration) / float64(time.Millisecond)
+	run.GenerationMS = float64(reporter.response.GenerationDuration) / float64(time.Millisecond)
+	run.PromptTokensPerSecond = reporter.response.PromptTokensPerSecond
+	run.GenerationTokensPerSecond = reporter.response.GenerationTokensPerSecond
 	run.Result = turn
 	if err := s.writeTurnRun(ctx, run, EvTurnCompleted); err != nil {
 		return run, err
 	}
+	s.progress.Forget(run.ID)
 	return run, nil
 }
 
