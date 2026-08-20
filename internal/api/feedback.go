@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/mirivlad/barrymore/internal/event"
-	"github.com/mirivlad/barrymore/internal/experience"
 )
 
 // experienceFeedback records the owner's explicit judgement of one completed
