@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mirivlad/barrymore/internal/experience"
+	"github.com/mirivlad/barrymore/internal/memory"
 )
 
 // recallContext retrieves experience for this question before deliberation.
@@ -59,19 +60,31 @@ func (s *Service) recallContext(ctx context.Context, question string) ([]Context
 				if ep.Result != "" {
 					b.WriteString("; тогда результат: " + ep.Result)
 				}
-				likes, dislikes := feedbackCounts(e.Feedback)
-				if likes > 0 || dislikes > 0 {
-					b.WriteString(fmt.Sprintf("; feedback +%d/-%d", likes, dislikes))
+				if summary := feedbackSummary(e.Feedback); summary != "" {
+					b.WriteString("; " + summary)
 				}
 				b.WriteString("\n")
 				for _, src := range e.Sources {
-					b.WriteString("  evidence: " + src.Evidence + "\n")
+					fresh := src.Stability
+					if fresh == "" {
+						fresh = experience.StabilityStable
+					}
+					b.WriteString(fmt.Sprintf("  evidence [%s; observed=%s]: %s\n",
+						fresh, src.ObservedAt.Format("2006-01-02 15:04:05Z07:00"), src.Evidence))
 				}
 			}
 			for _, p := range recalled.Procedures {
 				proc := p.Procedure
-				b.WriteString(fmt.Sprintf("- Procedure %s: %s; risk=%s; success=%d failure=%d\n",
+				b.WriteString(fmt.Sprintf("- Procedure %s: %s; risk=%s; success=%d failure=%d",
 					proc.ID, proc.Title, proc.RiskClass, proc.Succeeded, proc.Failed))
+				if proc.SourceEpisodeID != "" {
+					if fbs, err := s.experience.Feedback(ctx, proc.SourceEpisodeID); err == nil {
+						if summary := feedbackSummary(fbs); summary != "" {
+							b.WriteString("; source_" + summary)
+						}
+					}
+				}
+				b.WriteString("\n")
 				for i, step := range proc.Steps {
 					b.WriteString(fmt.Sprintf("  %d. %s", i+1, step.Capability))
 					if step.Purpose != "" {
@@ -81,6 +94,7 @@ func (s *Service) recallContext(ctx context.Context, question string) ([]Context
 				}
 			}
 			b.WriteString("Не повторяй старый RESULT, если состояние могло измениться; повтори подходящую Procedure и получи новое evidence.\n")
+			b.WriteString("Текущий dislike — сильный сигнал не повторять прежний вывод или способ вслепую; перепроверь его. Like усиливает доверие к способу, но не превращает устаревший факт в текущий.\n")
 			sections = append(sections, ContextSection{Title: "Похожий прошлый опыт", Body: b.String()})
 		}
 		trace = append(trace, fmt.Sprintf("query recall опыта: episodes=%d procedures=%d",
@@ -90,7 +104,11 @@ func (s *Service) recallContext(ctx context.Context, question string) ([]Context
 	return sections, trace, nil
 }
 
-func feedbackCounts(items []experience.Feedback) (likes, dislikes int) {
+func feedbackSummary(items []experience.Feedback) string {
+	if len(items) == 0 {
+		return ""
+	}
+	likes, dislikes := 0, 0
 	for _, fb := range items {
 		switch fb.Value {
 		case experience.FeedbackLike:
@@ -99,5 +117,14 @@ func feedbackCounts(items []experience.Feedback) (likes, dislikes int) {
 			dislikes++
 		}
 	}
-	return likes, dislikes
+	current := items[len(items)-1].Value
+	if len(items) == 1 {
+		return "current_feedback=" + current
+	}
+	return fmt.Sprintf("current_feedback=%s; feedback_history like=%d dislike=%d",
+		current, likes, dislikes)
 }
+
+// Keep the memory import explicit: recallContext is the boundary that combines
+// factual memory and episodic/procedural experience.
+var _ memory.RecallItem
