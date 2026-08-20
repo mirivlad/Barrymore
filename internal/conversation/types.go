@@ -28,16 +28,21 @@ type Conversation struct {
 
 // Message — реплика.
 type Message struct {
-	ID             string `json:"id"`
-	ConversationID string `json:"conversation_id"`
-	ThreadID       string `json:"thread_id,omitempty"`
-	Role           string `json:"role"`
-	Content        string `json:"content"`
-	Provider       string `json:"provider,omitempty"`
-	Model          string `json:"model,omitempty"`
-	PromptTokens   int    `json:"prompt_tokens,omitempty"`
-	OutputTokens   int    `json:"output_tokens,omitempty"`
-	LatencyMS      int64  `json:"latency_ms,omitempty"`
+	ID                        string  `json:"id"`
+	ConversationID            string  `json:"conversation_id"`
+	ThreadID                  string  `json:"thread_id,omitempty"`
+	Role                      string  `json:"role"`
+	Content                   string  `json:"content"`
+	Provider                  string  `json:"provider,omitempty"`
+	Model                     string  `json:"model,omitempty"`
+	PromptTokens              int     `json:"prompt_tokens,omitempty"`
+	OutputTokens              int     `json:"output_tokens,omitempty"`
+	LatencyMS                 int64   `json:"latency_ms,omitempty"`
+	PromptMS                  float64 `json:"prompt_ms,omitempty"`
+	GenerationMS              float64 `json:"generation_ms,omitempty"`
+	PromptTokensPerSecond     float64 `json:"prompt_tokens_per_second,omitempty"`
+	GenerationTokensPerSecond float64 `json:"generation_tokens_per_second,omitempty"`
+	TurnLatencyMS             int64   `json:"turn_latency_ms,omitempty"`
 	// EpisodeID связывает финальную реплику с единицей опыта, которую можно
 	// явно оценить. Старые сообщения до появления Episode остаются без связи.
 	EpisodeID string `json:"episode_id,omitempty"`

@@ -285,4 +285,14 @@ func TestExecuteTurnUsesPrivateStreamingProgressAndPersistsExactTelemetry(t *tes
 	if _, ok := talk.Progress().Latest(queued.ID); ok {
 		t.Fatal("completed turn kept ephemeral progress")
 	}
+	messages, err := talk.Messages(ctx, conv.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := messages[len(messages)-1]
+	if reply.PromptMS != 100 || reply.GenerationMS != 500 ||
+		reply.PromptTokensPerSecond != 120 || reply.GenerationTokensPerSecond != 8 ||
+		reply.TurnLatencyMS != completed.TotalLatencyMS {
+		t.Fatalf("reply telemetry=%+v", reply)
+	}
 }

@@ -3,6 +3,12 @@
 // Здесь нет собственного состояния домена — только отображение того,
 // что сообщает runtime, и различение факта, ожидания и вывода.
 
+import {
+  formatTurnProgress,
+  matchesTurn,
+  progressFromTurn,
+} from "./turn-progress.js";
+
 const $ = (id) => document.getElementById(id);
 
 async function api(path, options = {}) {
@@ -19,7 +25,9 @@ async function api(path, options = {}) {
   }
   if (!res.ok) {
     const message = body?.detail || body?.title || res.statusText;
-    throw new Error(message);
+    const error = new Error(message);
+    error.status = res.status;
+    throw error;
   }
   return body;
 }
@@ -1357,6 +1365,12 @@ window.showReport = async (id) => {
 
 let currentConversation = null;
 let sending = false;
+let providerReady = false;
+let activeTurn = null;
+let activeProgress = null;
+let progressReceivedAt = 0;
+let progressTimer = null;
+const terminalTurns = new Set();
 
 const PROVIDER_TONE = { ready: "ok", unreachable: "bad", not_configured: "warn", broken: "bad" };
 
@@ -1689,12 +1703,158 @@ window.showTab = (name) => showTab(name);
 
 // ---------- разговор ----------
 
+function turnStorageKey(conversationID) {
+  return `barrymore.turn.${conversationID}`;
+}
+
+function setComposerState() {
+  const busy = sending || Boolean(activeTurn);
+  $("talk-send").disabled = !providerReady || busy;
+  $("talk-input").disabled = Boolean(activeTurn);
+}
+
+function removeProgressRow() {
+  document.getElementById("turn-progress")?.remove();
+}
+
+function clearActiveTurn() {
+  activeTurn = null;
+  activeProgress = null;
+  progressReceivedAt = 0;
+  if (progressTimer) clearInterval(progressTimer);
+  progressTimer = null;
+  removeProgressRow();
+  setComposerState();
+}
+
+function renderActiveProgress() {
+  if (!activeTurn || activeTurn.conversation_id !== currentConversation || !activeProgress) return;
+  let row = document.getElementById("turn-progress");
+  if (!row) {
+    row = document.createElement("div");
+    row.id = "turn-progress";
+    row.className = "turn-progress";
+    row.setAttribute("role", "status");
+    row.setAttribute("aria-live", "polite");
+    $("chat").append(row);
+  }
+  const elapsed = Number(activeProgress.elapsed_ms) || 0;
+  const liveElapsed = elapsed + Math.max(0, Date.now() - progressReceivedAt);
+  row.textContent = formatTurnProgress({ ...activeProgress, elapsed_ms: liveElapsed });
+  row.title = row.textContent;
+  $("chat").scrollTop = $("chat").scrollHeight;
+}
+
+function setActiveTurn(turn, progress = null) {
+  if (!turn || turn.conversation_id !== currentConversation) return;
+  activeTurn = turn;
+  localStorage.setItem(turnStorageKey(turn.conversation_id), turn.id);
+  activeProgress = progress || turn.progress || progressFromTurn(turn);
+  progressReceivedAt = Date.now();
+  if (progressTimer) clearInterval(progressTimer);
+  progressTimer = setInterval(renderActiveProgress, 1000);
+  setComposerState();
+  renderActiveProgress();
+}
+
+function updateLiveProgress(progress) {
+  if (!matchesTurn(progress, activeTurn)) return;
+  activeProgress = progress;
+  progressReceivedAt = Date.now();
+  renderActiveProgress();
+}
+
+async function handleTerminalTurn(turn) {
+  if (!turn || terminalTurns.has(turn.id)) return;
+  terminalTurns.add(turn.id);
+  const isCurrent = turn.conversation_id === currentConversation;
+  if (turn.status === "completed") {
+    localStorage.removeItem(turnStorageKey(turn.conversation_id));
+  }
+  if (activeTurn?.id === turn.id) clearActiveTurn();
+  if (!isCurrent) {
+    terminalTurns.delete(turn.id);
+    return;
+  }
+
+  await loadChat(false);
+  if (currentConversation !== turn.conversation_id) {
+    terminalTurns.delete(turn.id);
+    return;
+  }
+  if (turn.status === "completed" && turn.result) {
+    takeTurn(turn.result);
+    await loadThreadState();
+    await refreshAffairs();
+    loadMemory();
+  } else {
+    const detail = turn.error_message ||
+      (turn.status === "interrupted" ? "Ход был прерван перезапуском." : "Ответ получить не удалось.");
+    $("chat").insertAdjacentHTML("beforeend",
+      `<div class="bubble barrymore"><span class="tag bad">не отвечено</span>
+       <div class="said" style="margin-top:6px">${esc(detail)}</div></div>`);
+    $("chat").scrollTop = $("chat").scrollHeight;
+  }
+  setComposerState();
+  terminalTurns.delete(turn.id);
+}
+
+async function refreshTurn(turnID) {
+  if (!currentConversation || !turnID) return;
+  const conversationID = currentConversation;
+  const turn = await api(`/api/v1/conversations/${conversationID}/turns/${turnID}`);
+  if (currentConversation !== conversationID) return;
+  if (["completed", "failed", "interrupted"].includes(turn.status)) {
+    await handleTerminalTurn(turn);
+    return;
+  }
+  setActiveTurn(turn, turn.progress);
+}
+
+async function restoreCurrentTurn() {
+  if (!currentConversation) {
+    clearActiveTurn();
+    return;
+  }
+  const conversationID = currentConversation;
+  try {
+    const turn = await api(`/api/v1/conversations/${conversationID}/turns/active`);
+    if (currentConversation === conversationID) setActiveTurn(turn, turn.progress);
+    return;
+  } catch (err) {
+    if (err.status !== 404) {
+      if (currentConversation === conversationID) {
+        clearActiveTurn();
+        activeTurn = { id: "", conversation_id: conversationID };
+        setComposerState();
+        $("chat").insertAdjacentHTML("beforeend",
+          `<div class="turn-progress" id="turn-progress" role="status" aria-live="polite">
+           Состояние хода не читается: ${esc(err.message)}</div>`);
+      }
+      return;
+    }
+  }
+
+  const remembered = localStorage.getItem(turnStorageKey(conversationID));
+  if (remembered) {
+    try {
+      await refreshTurn(remembered);
+      return;
+    } catch (err) {
+      if (err.status !== 404) return;
+      localStorage.removeItem(turnStorageKey(conversationID));
+    }
+  }
+  if (currentConversation === conversationID) clearActiveTurn();
+}
+
 async function loadTalk() {
   try {
     const d = await api("/api/v1/conversations");
     const p = d.provider || {};
     const ready = p.status === "ready";
-    $("talk-send").disabled = !ready;
+    providerReady = ready;
+    setComposerState();
     $("talk-status").innerHTML = ready
       ? techNote(`${esc(p.model || "")}${
           p.latency ? ` · отклик ${Math.round(p.latency / 1e6)} мс` : ""
@@ -1704,8 +1864,13 @@ async function loadTalk() {
 
     const items = d.items || [];
     if (!currentConversation && items.length) currentConversation = items[0].id;
-    if (currentConversation) await loadChat();
-    else $("chat").innerHTML = greeting();
+    if (currentConversation) {
+      await loadChat();
+      await restoreCurrentTurn();
+    } else {
+      clearActiveTurn();
+      $("chat").innerHTML = greeting();
+    }
     await loadThreadState();
     await refreshAffairs();
   } catch (err) {
@@ -1828,10 +1993,12 @@ window.openConversation = async (id) => {
     closeDetail();
     return;
   }
+  clearActiveTurn();
   currentConversation = id;
   turnAffairs = [];
   closeDetail();
   await loadChat();
+  await restoreCurrentTurn();
   await loadThreadState();
   await refreshAffairs();
 };
@@ -1972,21 +2139,32 @@ function bubble(m) {
   const trace = (m.retrieval_trace || []).length
     ? `<div class="meta">подано в контекст: ${m.retrieval_trace.map(esc).join("; ")}</div>`
     : "";
+  const performance = [];
+  if (m.role === "barrymore" && (m.prompt_tokens || m.output_tokens)) {
+    performance.push(`${m.prompt_tokens || 0} вход · ${m.output_tokens || 0} выход`);
+  }
+  if (m.role === "barrymore" && m.generation_tokens_per_second) {
+    performance.push(`${Number(m.generation_tokens_per_second).toFixed(1)} ток/с`);
+  }
+  if (m.role === "barrymore" && m.turn_latency_ms) {
+    performance.push(`${Math.round(m.turn_latency_ms / 1000)} с`);
+  }
+  const performanceLine = performance.length
+    ? `<div class="turn-metrics">${performance.map(esc).join(" · ")}</div>`
+    : "";
   return `<div class="bubble ${esc(m.role)}"><div class="meta">${who} · ${
     when(m.created_at)}${meta.length ? techNote(` · ${meta.join(" · ")}`) : ""
-  }</div><div class="said">${esc(m.content)}</div>${
+  }</div><div class="said">${esc(m.content)}</div>${performanceLine}${
     trace ? `<span class="tech-only">${trace}</span>` : ""}</div>`;
 }
 
 // restore=false нужен, когда следом всё равно пересобирается сайдбар:
 // два подряд обновления подряд дают заметный мигающий скачок.
 //
-// Пока идёт ответ, чат не перерисовывается вовсе. Найдено живьём: владелец
-// задал вопрос, переключился на «Нити», вернулся — и увидел пустой экран,
-// будто спросил в пустоту. Перерисовка стирала и его реплику, и «Бэрримор
-// думает», а ответ приходил через минуту как ни в чём не бывало.
+// Активный ход после перерисовки восстанавливается из TurnRun; DOM больше не
+// является единственным местом, где хранится факт выполняющейся работы.
 async function loadChat(restore = true) {
-  if (!currentConversation || sending) return;
+  if (!currentConversation) return;
   try {
     const d = await api(`/api/v1/conversations/${currentConversation}/messages`);
     const items = d.items || [];
@@ -2052,9 +2230,11 @@ $("talk-new").addEventListener("click", async () => {
       method: "POST",
       body: JSON.stringify({ thread_id: "", title: "" }),
     });
+    clearActiveTurn();
     currentConversation = c.id;
     turnAffairs = [];
     await loadChat(false);
+    await restoreCurrentTurn();
     // Карточка нити принадлежит разговору, а не экрану. Без этого на новом
     // разговоре оставалась нить прежнего — и владелец читал бы состояние
     // одного дела, разговаривая о другом.
@@ -2066,7 +2246,7 @@ $("talk-new").addEventListener("click", async () => {
 });
 
 async function send() {
-  if (sending) return;
+  if (sending || activeTurn) return;
   const text = $("talk-input").value.trim();
   if (!text) return;
 
@@ -2075,51 +2255,48 @@ async function send() {
       method: "POST",
       body: JSON.stringify({ thread_id: "", title: "" }),
     });
+    clearActiveTurn();
     currentConversation = c.id;
   }
 
   sending = true;
-  $("talk-send").disabled = true;
+  setComposerState();
   $("talk-input").value = "";
   // Приветствие — не реплика: как только разговор начался, оно уходит.
   // Реплика владельца есть в любом непустом разговоре, поэтому её отсутствие
   // и означает «здесь пока только приветствие».
   if (!$("chat").querySelector(".bubble.person")) $("chat").innerHTML = "";
   $("chat").insertAdjacentHTML("beforeend",
-    `<div class="bubble person"><div class="meta">Вы · только что</div>${esc(text)}</div>
-     <div class="thinking" id="thinking">Бэрримор думает… на локальной модели это занимает до минуты.</div>`);
+    `<div class="bubble person"><div class="meta">Вы · только что</div>
+     <div class="said">${esc(text)}</div></div>`);
   $("chat").scrollTop = $("chat").scrollHeight;
 
-  const started = Date.now();
-  const timer = setInterval(() => {
-    const el = document.getElementById("thinking");
-    if (el) el.textContent = `Бэрримор думает… ${Math.round((Date.now() - started) / 1000)} с`;
-  }, 1000);
-  // Уходя с вкладки, владелец не должен терять ответ. Секундомер идёт дальше,
-  // и по возвращении видно то же, что и было.
-
   try {
-    const turn = await api(`/api/v1/conversations/${currentConversation}/messages`, {
+    const conversationID = currentConversation;
+    const accepted = await api(`/api/v1/conversations/${conversationID}/messages`, {
       method: "POST", body: JSON.stringify({ text }),
     });
-    clearInterval(timer);
-    // Ожидание кончилось раньше, чем разбор ответа: иначе перерисовка чата
-    // сама себя и запретила бы.
     sending = false;
     await loadChat(false);
-    takeTurn(turn);
-    await loadThreadState();
-    await refreshAffairs();
-    loadMemory();
+    if (currentConversation !== conversationID) return;
+    setActiveTurn({
+      id: accepted.turn_id,
+      conversation_id: conversationID,
+      status: accepted.status,
+      stage: "queued",
+      stage_label: "Готовлю ход",
+      created_at: new Date().toISOString(),
+    });
+    await refreshTurn(accepted.turn_id);
   } catch (err) {
-    clearInterval(timer);
     sending = false;
-    const el = document.getElementById("thinking");
-    if (el) el.outerHTML = `<div class="bubble barrymore"><span class="tag bad">не отвечено</span>
-      <div style="margin-top:6px">${esc(err.message)}</div></div>`;
+    removeProgressRow();
+    $("chat").insertAdjacentHTML("beforeend",
+      `<div class="bubble barrymore"><span class="tag bad">не отвечено</span>
+      <div style="margin-top:6px">${esc(err.message)}</div></div>`);
   } finally {
     sending = false;
-    $("talk-send").disabled = false;
+    setComposerState();
   }
 }
 
@@ -2615,6 +2792,7 @@ function connectStream() {
   src.onopen = () => {
     $("live").textContent = "поток: подключён";
     $("live").className = "tag ok tech-only";
+    if (activeTurn?.id) refreshTurn(activeTurn.id).catch(() => {});
   };
 
   src.onmessage = (msg) => handleEvent(msg);
@@ -2624,6 +2802,14 @@ function connectStream() {
     $("live").className = "tag warn";
   });
 
+  src.addEventListener("conversation.turn.progress", (msg) => {
+    try {
+      updateLiveProgress(JSON.parse(msg.data));
+    } catch {
+      // Повреждённый ephemeral snapshot не меняет durable состояние хода.
+    }
+  });
+
   // EventSource сам переподключается и присылает Last-Event-ID,
   // поэтому пропущенные события догоняются из журнала.
   src.addEventListener("message", handleEvent);
@@ -2631,6 +2817,9 @@ function connectStream() {
    "discrepancy.detected", "reflex.started", "reflex.completed", "reflex.failed",
    "escalation.requested", "verification.completed", "work_order.state.changed",
    "observation.recorded", "expectation.created", "expectation.satisfied",
+   "conversation.turn.queued", "conversation.turn.started",
+   "conversation.turn.stage.changed", "conversation.turn.completed",
+   "conversation.turn.failed", "conversation.turn.interrupted",
   ].forEach((type) => src.addEventListener(type, handleEvent));
 }
 
@@ -2670,6 +2859,18 @@ function handleEvent(msg) {
       env.event_type.startsWith("conversation.thread.")) {
     loadThreadState();
     if (openThreadID) openThread(openThreadID);
+  }
+  if (env.event_type.startsWith("conversation.turn.")) {
+    const turn = env.payload;
+    if (!turn || turn.conversation_id !== currentConversation) return;
+    if (["completed", "failed", "interrupted"].includes(turn.status)) {
+      if (activeTurn?.id === turn.id ||
+          localStorage.getItem(turnStorageKey(turn.conversation_id)) === turn.id) {
+        handleTerminalTurn(turn);
+      }
+    } else if (activeTurn?.id === turn.id) {
+      setActiveTurn(turn);
+    }
   }
 }
 

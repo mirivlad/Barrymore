@@ -181,14 +181,21 @@ func (s *Service) Messages(ctx context.Context, conversationID string, limit int
 	}
 	rows, err := s.db.Reader().QueryContext(ctx, `
 		SELECT m.id, m.conversation_id, COALESCE(m.thread_id, ''), m.role, m.content, m.provider, m.model,
-		       m.prompt_tokens, m.output_tokens, m.latency_ms, m.episode_id,
+		       m.prompt_tokens, m.output_tokens, m.latency_ms,
+		       COALESCE(tr.prompt_ms, 0), COALESCE(tr.generation_ms, 0),
+		       COALESCE(tr.prompt_tokens_per_second, 0),
+		       COALESCE(tr.generation_tokens_per_second, 0),
+		       COALESCE(tr.total_latency_ms, 0), m.episode_id,
 		       COALESCE((
 		           SELECT f.value FROM experience_feedback f
 		            WHERE f.episode_id = m.episode_id
 		            ORDER BY f.rowid DESC LIMIT 1
 		       ), ''),
 		       m.retrieval_trace, m.created_at
-		  FROM messages m WHERE m.conversation_id = ?
+		  FROM messages m
+		  LEFT JOIN conversation_turn_runs tr
+		    ON tr.reply_message_id = m.id AND tr.status = 'completed'
+		 WHERE m.conversation_id = ?
 		 ORDER BY m.created_at DESC, m.id DESC LIMIT ?`, conversationID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("чтение сообщений %s: %w", conversationID, err)
@@ -204,6 +211,8 @@ func (s *Service) Messages(ctx context.Context, conversationID string, limit int
 		)
 		if err := rows.Scan(&m.ID, &m.ConversationID, &m.ThreadID, &m.Role, &m.Content,
 			&m.Provider, &m.Model, &m.PromptTokens, &m.OutputTokens, &m.LatencyMS,
+			&m.PromptMS, &m.GenerationMS, &m.PromptTokensPerSecond,
+			&m.GenerationTokensPerSecond, &m.TurnLatencyMS,
 			&m.EpisodeID, &m.Feedback, &trace, &createdAt); err != nil {
 			return nil, err
 		}
