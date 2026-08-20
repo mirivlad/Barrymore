@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/mirivlad/barrymore/internal/event"
 	"github.com/mirivlad/barrymore/internal/experience"
 	"github.com/mirivlad/barrymore/internal/memory"
 )
@@ -18,15 +19,16 @@ func TestDirectAnswerGetsUnknownEpisodeAndDurableReplyLink(t *testing.T) {
 	}`}
 	h := newHarness(t, prov, memory.DefaultPolicy())
 	c := h.conversation(t, "")
+	ctx := context.Background()
 
-	turn, err := h.talk.Send(context.Background(), c.ID, "Ответь без инструментов")
+	turn, err := h.talk.Send(ctx, c.ID, "Ответь без инструментов")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if turn.EpisodeID == "" {
 		t.Fatal("финальный ответ без Research остался без Episode")
 	}
-	ep, err := h.talk.Experience().Episode(context.Background(), turn.EpisodeID)
+	ep, err := h.talk.Experience().Episode(ctx, turn.EpisodeID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +36,7 @@ func TestDirectAnswerGetsUnknownEpisodeAndDurableReplyLink(t *testing.T) {
 		t.Fatalf("непроверенный ответ получил неверный технический исход: %+v", ep)
 	}
 
-	msgs, err := h.talk.Messages(context.Background(), c.ID, 10)
+	msgs, err := h.talk.Messages(ctx, c.ID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,5 +48,17 @@ func TestDirectAnswerGetsUnknownEpisodeAndDurableReplyLink(t *testing.T) {
 	}
 	if msgs[1].Feedback != "" {
 		t.Fatalf("отсутствие оценки превратилось в сигнал: %q", msgs[1].Feedback)
+	}
+
+	if _, err := h.talk.Experience().RecordFeedback(ctx, turn.EpisodeID,
+		experience.FeedbackLike, "", event.Actor{Type: event.ActorPerson}); err != nil {
+		t.Fatal(err)
+	}
+	msgs, err = h.talk.Messages(ctx, c.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msgs[1].Feedback != experience.FeedbackLike {
+		t.Fatalf("последняя явная оценка не дошла в read model реплики: %q", msgs[1].Feedback)
 	}
 }
