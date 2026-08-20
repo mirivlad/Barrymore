@@ -52,6 +52,18 @@ export function progressFromTurn(turn, now = Date.now()) {
   };
 }
 
+export function restoreTurnProgress(turn, snapshot = null, now = Date.now()) {
+  const durable = progressFromTurn(turn, now);
+  if (!snapshot) return durable;
+  return {
+    ...durable,
+    ...snapshot,
+    turn_id: durable.turn_id,
+    conversation_id: durable.conversation_id,
+    elapsed_ms: Math.max(durable.elapsed_ms, Number(snapshot.elapsed_ms) || 0),
+  };
+}
+
 export function matchesTurn(progress, turn) {
   return Boolean(progress && turn &&
     progress.turn_id === turn.id &&

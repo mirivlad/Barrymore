@@ -5,6 +5,7 @@ import {
   formatTurnProgress,
   matchesTurn,
   progressFromTurn,
+  restoreTurnProgress,
 } from "./turn-progress.js";
 
 test("marks live generation telemetry approximate", () => {
@@ -49,4 +50,21 @@ test("correlates both conversation and turn", () => {
   assert.equal(matchesTurn({ turn_id: "trn_1", conversation_id: "conv_1" }, current), true);
   assert.equal(matchesTurn({ turn_id: "trn_2", conversation_id: "conv_1" }, current), false);
   assert.equal(matchesTurn({ turn_id: "trn_1", conversation_id: "conv_2" }, current), false);
+});
+
+test("reload does not reset elapsed time to an older ephemeral snapshot", () => {
+  const restored = restoreTurnProgress({
+    id: "trn_1",
+    conversation_id: "conv_1",
+    stage: "provider_generation",
+    stage_label: "Формирую ответ",
+    started_at: "2026-08-21T10:00:00Z",
+  }, {
+    turn_id: "trn_1",
+    conversation_id: "conv_1",
+    stage: "provider_generation",
+    label: "Формирую ответ",
+    elapsed_ms: 0,
+  }, Date.parse("2026-08-21T10:00:15Z"));
+  assert.equal(restored.elapsed_ms, 15000);
 });

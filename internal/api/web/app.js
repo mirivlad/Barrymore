@@ -6,7 +6,7 @@
 import {
   formatTurnProgress,
   matchesTurn,
-  progressFromTurn,
+  restoreTurnProgress,
 } from "./turn-progress.js";
 
 const $ = (id) => document.getElementById(id);
@@ -1749,7 +1749,7 @@ function setActiveTurn(turn, progress = null) {
   if (!turn || turn.conversation_id !== currentConversation) return;
   activeTurn = turn;
   localStorage.setItem(turnStorageKey(turn.conversation_id), turn.id);
-  activeProgress = progress || turn.progress || progressFromTurn(turn);
+  activeProgress = restoreTurnProgress(turn, progress || turn.progress);
   progressReceivedAt = Date.now();
   if (progressTimer) clearInterval(progressTimer);
   progressTimer = setInterval(renderActiveProgress, 1000);
