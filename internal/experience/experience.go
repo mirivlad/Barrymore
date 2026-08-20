@@ -54,6 +54,13 @@ const (
 	RiskDestructive     = "destructive"
 )
 
+const (
+	StabilityImmutable = "immutable"
+	StabilityStable    = "stable"
+	StabilityVolatile  = "volatile"
+	StabilityRealtime  = "realtime"
+)
+
 type Episode struct {
 	ID             string          `json:"id"`
 	Goal           string          `json:"goal"`
@@ -79,6 +86,7 @@ type Source struct {
 	Title      string    `json:"title,omitempty"`
 	Evidence   string    `json:"evidence"`
 	Confidence float64   `json:"confidence"`
+	Stability  string    `json:"stability"`
 	ObservedAt time.Time `json:"observed_at"`
 	CreatedAt  time.Time `json:"created_at"`
 }
