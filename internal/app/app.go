@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -100,9 +101,13 @@ type App struct {
 	// lock не даёт второму экземпляру работать на том же каталоге данных.
 	lock *lockfile
 
-	stopOnce sync.Once
-	stopped  chan struct{}
-	wg       sync.WaitGroup
+	stopOnce   sync.Once
+	stopped    chan struct{}
+	wg         sync.WaitGroup
+	turnMu     sync.Mutex
+	turnCtx    context.Context
+	turnCancel context.CancelFunc
+	closing    bool
 }
 
 // DefaultDataRoot возвращает каталог данных по умолчанию.
@@ -159,7 +164,9 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		return nil, err
 	}
 
+	turnCtx, turnCancel := context.WithCancel(ctx)
 	a := &App{Config: cfg, DB: db, Log: cfg.Logger, Clock: cfg.Clock,
+		turnCtx: turnCtx, turnCancel: turnCancel,
 		lock: lock, stopped: make(chan struct{})}
 	a.Settings = NewSettingsStore(cfg.DataRoot, cfg.Settings)
 	a.Journal = event.NewJournal(db, cfg.Clock)
@@ -334,6 +341,14 @@ func (a *App) Start(ctx context.Context) error {
 	if err := a.DB.Integrity(ctx); err != nil {
 		return err
 	}
+	interrupted, err := a.Talk.InterruptUnfinished(ctx)
+	if err != nil {
+		return fmt.Errorf("восстановление незавершённых разговорных ходов: %w", err)
+	}
+	if interrupted > 0 {
+		a.Log.Info("незавершённые разговорные ходы отмечены прерванными",
+			"количество", interrupted)
+	}
 	res, err := a.Delegation.Reconcile(ctx)
 	if err != nil {
 		return fmt.Errorf("восстановление после запуска: %w", err)
@@ -367,6 +382,46 @@ func (a *App) Start(ctx context.Context) error {
 		go a.ensureLocalModel(ctx)
 	}
 	return nil
+}
+
+var ErrShuttingDown = errors.New("Barrymore завершает работу и не принимает новые ходы")
+
+// BeginTurn atomically accepts an owner message, registers its runner before
+// returning, and executes it under the application lifetime rather than the
+// HTTP request lifetime.
+func (a *App) BeginTurn(ctx context.Context, conversationID, text string) (conversation.TurnRun, error) {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	if a.closing {
+		return conversation.TurnRun{}, ErrShuttingDown
+	}
+	run, err := a.Talk.BeginTurn(ctx, conversationID, text)
+	if err != nil {
+		return conversation.TurnRun{}, err
+	}
+	a.wg.Add(1)
+	go a.executeTurn(run.ID)
+	return run, nil
+}
+
+func (a *App) executeTurn(turnID string) {
+	defer a.wg.Done()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			a.Log.Error("паника при выполнении разговорного хода",
+				"turn", turnID, "panic", recovered, "stack", string(debug.Stack()))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := a.Talk.FailTurn(ctx, turnID, "turn_panic",
+				fmt.Sprintf("внутренняя паника: %v", recovered)); err != nil {
+				a.Log.Error("паника разговорного хода не записана", "turn", turnID, "error", err)
+			}
+		}
+	}()
+	if _, err := a.Talk.ExecuteTurn(a.turnCtx, turnID); err != nil &&
+		!errors.Is(err, context.Canceled) {
+		a.Log.Error("разговорный ход завершился ошибкой", "turn", turnID, "error", err)
+	}
 }
 
 // observeLocalModel регулярно записывает наблюдение о состоянии модели.
@@ -468,7 +523,13 @@ func (a *App) tickLoop(ctx context.Context) {
 // Процессы исполнителей не убиваются: они живут в собственных scope и
 // переживают перезапуск (сценарий H).
 func (a *App) Close() error {
+	a.turnMu.Lock()
+	a.closing = true
+	if a.turnCancel != nil {
+		a.turnCancel()
+	}
 	a.stopOnce.Do(func() { close(a.stopped) })
+	a.turnMu.Unlock()
 	a.wg.Wait()
 	// Close вызывается и при неудачной сборке, когда собрано ещё не всё:
 	// падать на уборке — худший способ сообщить о проблеме в другом месте.

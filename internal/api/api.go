@@ -88,6 +88,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/conversations/{id}", s.getConversation)
 	mux.HandleFunc("GET /api/v1/conversations/{id}/messages", s.conversationMessages)
 	mux.HandleFunc("POST /api/v1/conversations/{id}/messages", s.sendMessage)
+	mux.HandleFunc("GET /api/v1/conversations/{id}/turns/active", s.activeTurn)
+	mux.HandleFunc("GET /api/v1/conversations/{id}/turns/{turn_id}", s.getTurn)
 	mux.HandleFunc("GET /api/v1/conversations/{id}/proposal", s.lastProposal)
 	mux.HandleFunc("POST /api/v1/conversations/{id}/thread", s.setConversationThread)
 	mux.HandleFunc("POST /api/v1/conversations/{id}/threads", s.startThreadFromTalk)
@@ -256,11 +258,14 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer sub.Close()
+	progressUpdates, closeProgress := s.app.Talk.Progress().Subscribe()
+	defer closeProgress()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
 	last := from
 	send := func(env event.Envelope) bool {
@@ -300,6 +305,18 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			if !send(env) {
 				return
 			}
+		case progress, ok := <-progressUpdates:
+			if !ok {
+				return
+			}
+			data, err := json.Marshal(progress)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "event: conversation.turn.progress\ndata: %s\n\n", data); err != nil {
+				return
+			}
+			flusher.Flush()
 		case <-keepalive.C:
 			// Комментарий SSE держит соединение и не мешает разбору.
 			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
@@ -800,30 +817,6 @@ func (s *Server) conversationMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
-}
-
-// sendMessage передаёт реплику владельца и возвращает ответ Бэрримора.
-//
-// Ответ на локальной модели занимает десятки секунд, поэтому запрос долгий
-// по своей природе; клиент должен это учитывать.
-func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Text string `json:"text"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	turn, err := s.app.Talk.Send(r.Context(), r.PathValue("id"), body.Text)
-	if err != nil {
-		if errors.Is(err, conversation.ErrNoProvider) {
-			writeProblem(w, http.StatusServiceUnavailable, "Бэрримор не разговаривает",
-				err.Error())
-			return
-		}
-		writeDomainError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, turn)
 }
 
 // ---------- память ----------

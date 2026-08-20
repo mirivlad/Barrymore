@@ -255,6 +255,30 @@ func (s *Service) InterruptUnfinished(ctx context.Context) (int, error) {
 	return len(runs), nil
 }
 
+// FailTurn terminalizes an active turn at an outer runtime boundary, such as
+// panic recovery in App. Ordinary execution errors are handled by ExecuteTurn.
+func (s *Service) FailTurn(ctx context.Context, turnID, code, message string) error {
+	run, err := s.turnRunByID(ctx, turnID)
+	if err != nil {
+		return err
+	}
+	if run.Status != TurnQueued && run.Status != TurnRunning {
+		return nil
+	}
+	finished := s.clock.Now()
+	run.Status = TurnFailed
+	run.StageLabel = "Ход завершился внутренней ошибкой"
+	run.ErrorCode = strings.TrimSpace(code)
+	run.ErrorMessage = strings.TrimSpace(message)
+	run.UpdatedAt = finished
+	run.FinishedAt = &finished
+	if err := s.writeTurnRun(ctx, run, EvTurnFailed); err != nil {
+		return err
+	}
+	s.progress.Forget(run.ID)
+	return nil
+}
+
 func (s *Service) TurnRun(ctx context.Context, conversationID, turnID string) (TurnRun, error) {
 	run, err := s.readTurnRun(ctx, ` WHERE id = ? AND conversation_id = ?`, turnID, conversationID)
 	if errors.Is(err, sql.ErrNoRows) {

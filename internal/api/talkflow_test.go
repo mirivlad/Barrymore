@@ -118,8 +118,7 @@ func TestReceptionCarriesTheWholePath(t *testing.T) {
 		map[string]any{"thread_id": "", "title": ""}, http.StatusCreated)
 	convID, _ := conv["id"].(string)
 
-	turn := s.mustDo(http.MethodPost, "/api/v1/conversations/"+convID+"/messages",
-		map[string]any{"text": "У меня Rollboard завис в worktree"}, http.StatusOK)
+	turn := sendAndWait(t, s, convID, "У меня Rollboard завис в worktree")
 
 	// 2. Бэрримор сам предлагает нить — с готовым названием и состоянием.
 	th, _ := turn["thread"].(map[string]any)
@@ -187,8 +186,7 @@ func TestOwnerCanDetachThreadFromConversation(t *testing.T) {
 	conv := s.mustDo(http.MethodPost, "/api/v1/conversations",
 		map[string]any{}, http.StatusCreated)
 	convID, _ := conv["id"].(string)
-	turn := s.mustDo(http.MethodPost, "/api/v1/conversations/"+convID+"/messages",
-		map[string]any{"text": "Rollboard завис"}, http.StatusOK)
+	turn := sendAndWait(t, s, convID, "Rollboard завис")
 	reply, _ := turn["reply"].(map[string]any)
 	messageID, _ := reply["id"].(string)
 	s.mustDo(http.MethodPost, "/api/v1/conversations/"+convID+"/threads",
@@ -209,14 +207,26 @@ func TestOrderFromTalkNeedsThread(t *testing.T) {
 	conv := s.mustDo(http.MethodPost, "/api/v1/conversations",
 		map[string]any{}, http.StatusCreated)
 	convID, _ := conv["id"].(string)
-	s.mustDo(http.MethodPost, "/api/v1/conversations/"+convID+"/messages",
-		map[string]any{"text": "Rollboard завис"}, http.StatusOK)
+	_ = sendAndWait(t, s, convID, "Rollboard завис")
 
 	code, out := s.do(http.MethodPost, "/api/v1/conversations/"+convID+"/work-orders",
 		map[string]any{"index": 0})
 	if code != http.StatusConflict {
 		t.Fatalf("код %d, ожидался 409: %v", code, out)
 	}
+}
+
+func sendAndWait(t *testing.T, s *server, conversationID, text string) map[string]any {
+	t.Helper()
+	accepted := s.mustDo(http.MethodPost, "/api/v1/conversations/"+conversationID+"/messages",
+		map[string]any{"text": text}, http.StatusAccepted)
+	turnID, _ := accepted["turn_id"].(string)
+	completed := waitForTurn(t, s, conversationID, turnID)
+	if completed["status"] != "completed" {
+		t.Fatalf("turn=%v", completed)
+	}
+	result, _ := completed["result"].(map[string]any)
+	return result
 }
 
 // talkServerAt поднимает приложение с разрешённым каталогом и провайдером.
