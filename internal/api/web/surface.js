@@ -4,6 +4,32 @@
 // владельцем. Но восстановление предыдущего хода после входа/reload не должно
 // внезапно распахивать боковую панель: старые решения уже видны счётчиком.
 
+// Старый интерфейс запоминал технический режим и последнюю внутреннюю вкладку.
+// После перехода к conversation-first поверхности это становится ловушкой:
+// человек обновляет страницу и снова попадает прямо в «Нити»/«Поручения»,
+// хотя эти сущности теперь считаются внутренностями Barrymore.
+//
+// Миграция выполняется ровно один раз в браузерном профиле. Дальше выбор
+// владельца снова уважается: включённый им позднее технический режим не
+// сбрасывается при каждом входе.
+const surfaceMigration = "barrymore.surface.conversation-first.v1";
+if (localStorage.getItem(surfaceMigration) !== "done") {
+  localStorage.removeItem("barrymore.tech");
+  localStorage.setItem("barrymore.tab", "talk");
+  localStorage.removeItem("barrymore.thread");
+  localStorage.setItem(surfaceMigration, "done");
+} else if (localStorage.getItem("barrymore.tech") !== "1") {
+  // Даже после миграции техническая вкладка не должна восстанавливаться при
+  // обычном режиме. Она могла остаться последней после того, как владелец
+  // выключил tech-mode и закрыл вкладку до того, как app.js успел сохранить
+  // возвращение в разговор.
+  const savedTab = localStorage.getItem("barrymore.tab");
+  const publicTabs = new Set(["talk", "settings"]);
+  if (savedTab && !publicTabs.has(savedTab)) {
+    localStorage.setItem("barrymore.tab", "talk");
+  }
+}
+
 const desk = document.getElementById("affairs");
 const toggle = document.getElementById("affairs-toggle");
 const send = document.getElementById("talk-send");
