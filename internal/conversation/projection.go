@@ -185,7 +185,7 @@ func (s *Service) Messages(ctx context.Context, conversationID string, limit int
 		       COALESCE((
 		           SELECT f.value FROM experience_feedback f
 		            WHERE f.episode_id = m.episode_id
-		            ORDER BY f.created_at DESC, f.id DESC LIMIT 1
+		            ORDER BY f.rowid DESC LIMIT 1
 		       ), ''),
 		       m.retrieval_trace, m.created_at
 		  FROM messages m WHERE m.conversation_id = ?
