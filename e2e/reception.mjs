@@ -259,7 +259,7 @@ esac
   });
 
   await check("внутренняя нить создаётся, но не появляется в обычном UI", async () => {
-    await page.getByRole("button", { name: "Завести нить" }).click();
+    await page.getByRole("button", { name: "Сохранить как дело" }).click();
     await waitFor("нить записана", async () => {
       const threads = await (await fetch(`${BASE}/api/v1/threads`)).json();
       return (threads.items || []).length === 1;
@@ -519,7 +519,7 @@ esac
     // результату самого действия — Бэрримор сообщил, что узнал прежний контекст.
     await waitFor("прежний контекст узнан и показан на Столе", async () => {
       const text = await page.locator("#affairs").innerText();
-      return text.includes("Отнёс разговор к нити");
+      return text.includes("Понял, к какому делу это относится");
     }, 30000);
 
     const threads = await (await fetch(`${BASE}/api/v1/threads`)).json();
@@ -536,7 +536,7 @@ esac
       await page.locator("#affairs-toggle").click();
     }
     const text = await page.locator("#affairs").innerText();
-    if (!text.includes("Отнёс разговор к нити")) {
+    if (!text.includes("Понял, к какому делу это относится")) {
       throw new Error(`связь сделана молча: ${text.slice(0, 200)}`);
     }
   });
