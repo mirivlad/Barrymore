@@ -1,6 +1,6 @@
 # Live Turn Progress
 
-**Status:** design approved; written specification awaiting owner review  
+**Status:** approved and implemented
 **Date:** 2026-08-21  
 **Scope:** durable conversation turns, live progress, and provider telemetry
 
