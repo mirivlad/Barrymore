@@ -26,14 +26,14 @@ func (s *Server) experienceFeedback(w http.ResponseWriter, r *http.Request, epis
 		writeDomainError(w, err)
 		return
 	}
+	current, err := exp.CurrentFeedback(r.Context(), episodeID)
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
 
 	switch r.Method {
 	case http.MethodGet:
-		var current *experience.Feedback
-		if len(items) > 0 {
-			last := items[len(items)-1]
-			current = &last
-		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items, "current": current})
 		return
 
@@ -48,14 +48,11 @@ func (s *Server) experienceFeedback(w http.ResponseWriter, r *http.Request, epis
 		body.Value = strings.ToLower(strings.TrimSpace(body.Value))
 		body.Note = strings.TrimSpace(body.Note)
 
-		if len(items) > 0 {
-			last := items[len(items)-1]
-			if last.Value == body.Value && last.Note == body.Note {
-				writeJSON(w, http.StatusOK, map[string]any{
-					"feedback": last, "current": last, "unchanged": true,
-				})
-				return
-			}
+		if current != nil && current.Value == body.Value && current.Note == body.Note {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"feedback": current, "current": current, "unchanged": true,
+			})
+			return
 		}
 
 		fb, err := exp.RecordFeedback(r.Context(), episodeID, body.Value, body.Note,
