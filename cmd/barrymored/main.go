@@ -2,15 +2,18 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -57,7 +60,7 @@ func run() error {
 		lmDir = flag.String("local-models-dir", "",
 			"каталог, где искать модели для выбора в интерфейсе")
 		lmBinary = flag.String("llama-server", "",
-			"путь к llama-server; пусто — third_party/llama.cpp/build/bin, затем PATH")
+			"путь к llama-server; пусто — комплектный libexec, затем обычные места и PATH")
 		lmPort    = flag.Int("local-model-port", 18080, "порт локального сервера модели")
 		lmContext = flag.Int("local-model-context", 32768, "размер контекста локальной модели")
 		lmThreads = flag.Int("local-model-threads", 0, "потоков CPU; 0 — умолчание llama-server")
@@ -81,19 +84,53 @@ func run() error {
 		return err
 	}
 
-	// Первый запуск: то, что можно выяснить самому, выясняется и сохраняется.
-	// Так `barrymored` без флагов находит модель там, где она обычно лежит.
-	firstRun := settings.LocalModel.Binary == "" && settings.LocalModel.Path == ""
-	if firstRun {
+	// Bootstrap повторяется, пока локальный first-run не закончен: это важно
+	// для сценария «сначала распаковал Barrymore, потом положил GGUF в data».
+	// При этом явный -local-model остаётся разовым флагом и не записывается как
+	// молчаливый постоянный выбор.
+	localSetupNeeded := settings.ProviderEndpoint == "" &&
+		settings.LocalModel.Path == "" && !modelChoiceDone(*dataRoot)
+	bootstrapNeeded := settings.LocalModel.Binary == "" || localSetupNeeded
+	choiceCompleted := false
+	if bootstrapNeeded {
+		oldPath := settings.LocalModel.Path
 		found, notes := app.Bootstrap(*dataRoot, settings)
 		settings = found
 		for _, n := range notes {
 			logger.Info("первый запуск: " + n)
 		}
+
+		canChooseLocal := localSetupNeeded && !given["local-model"] &&
+			!(given["provider"] && strings.TrimSpace(*provider) != "")
+		if canChooseLocal {
+			proposed := settings.LocalModel.Path
+			// Bootstrap может предложить единственную модель, но до решения
+			// владельца это ещё не сохранённый выбор.
+			settings.LocalModel.Path = ""
+			models, modelErr := app.FindModels(settings.LocalModel.ModelsDir, proposed)
+			if modelErr != nil {
+				logger.Warn("первый запуск: модели не перечислены", "error", modelErr)
+			} else {
+				selected, completed, note := chooseFirstRunModel(
+					models, proposed, stdinInteractive(), os.Stdin, os.Stdout)
+				settings.LocalModel.Path = selected
+				choiceCompleted = completed
+				if note != "" {
+					logger.Info("первый запуск: " + note)
+				}
+			}
+		} else {
+			settings.LocalModel.Path = oldPath
+		}
+
 		if err := app.SaveSettings(*dataRoot, settings); err != nil {
 			// Не смертельно: Бэрримор работает и без сохранённых настроек,
-			// просто будет искать заново при каждом запуске.
+			// просто будет выяснять их заново при следующем запуске.
 			logger.Warn("настройки первого запуска не сохранены", "error", err)
+		} else if choiceCompleted {
+			if err := markModelChoiceDone(*dataRoot); err != nil {
+				logger.Warn("решение о модели не отмечено", "error", err)
+			}
 		}
 	}
 
@@ -260,6 +297,115 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// chooseFirstRunModel превращает найденные GGUF в явное решение владельца.
+// Никакой модели при первом обычном запуске нельзя назначить молча: даже две
+// одинаковые по размеру модели отличаются поведением, а единственная на диске
+// всё равно могла оказаться там для теста.
+func chooseFirstRunModel(models []app.AvailableModel, proposed string, interactive bool, in io.Reader, out io.Writer) (string, bool, string) {
+	if len(models) == 0 {
+		return "", false, "GGUF-модели пока не найдены; положите файл в data/local_models и запустите снова"
+	}
+	if !interactive {
+		return "", false, "модель найдена, но выбор требует владельца; запустите Barrymore интерактивно или выберите модель в настройках"
+	}
+
+	reader := bufio.NewReader(in)
+	if len(models) == 1 {
+		fmt.Fprintf(out, "\nНайдена локальная модель:\n  %s (%s)\n", models[0].Name, humanBytes(models[0].SizeBytes))
+		fmt.Fprint(out, "Использовать её для Бэрримора? [Y/n]: ")
+		answer, err := reader.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return "", false, "выбор модели не прочитан: " + err.Error()
+		}
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		switch answer {
+		case "", "y", "yes", "д", "да":
+			return models[0].Path, true, "владелец подтвердил модель " + models[0].Name
+		case "n", "no", "н", "нет", "0":
+			return "", true, "владелец решил пока работать без локальной разговорной модели"
+		default:
+			return "", false, "ответ не распознан; выбор модели не сохранён"
+		}
+	}
+
+	defaultChoice := 1
+	for i, m := range models {
+		if sameModelPath(m.Path, proposed) {
+			defaultChoice = i + 1
+			break
+		}
+	}
+	fmt.Fprintln(out, "\nНайдены локальные модели:")
+	for i, m := range models {
+		fmt.Fprintf(out, "  %d. %s (%s)\n", i+1, m.Name, humanBytes(m.SizeBytes))
+	}
+	fmt.Fprintln(out, "  0. Пока без локальной разговорной модели")
+	fmt.Fprintf(out, "Выберите модель [%d]: ", defaultChoice)
+	answer, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", false, "выбор модели не прочитан: " + err.Error()
+	}
+	answer = strings.TrimSpace(answer)
+	if answer == "" {
+		answer = strconv.Itoa(defaultChoice)
+	}
+	choice, err := strconv.Atoi(answer)
+	if err != nil || choice < 0 || choice > len(models) {
+		return "", false, "номер модели не распознан; выбор не сохранён"
+	}
+	if choice == 0 {
+		return "", true, "владелец решил пока работать без локальной разговорной модели"
+	}
+	selected := models[choice-1]
+	return selected.Path, true, "владелец выбрал модель " + selected.Name
+}
+
+func modelChoiceMarker(dataRoot string) string {
+	return filepath.Join(dataRoot, "local-model-choice.done")
+}
+
+func modelChoiceDone(dataRoot string) bool {
+	_, err := os.Stat(modelChoiceMarker(dataRoot))
+	return err == nil
+}
+
+func markModelChoiceDone(dataRoot string) error {
+	if err := os.MkdirAll(dataRoot, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(modelChoiceMarker(dataRoot), []byte("confirmed\n"), 0o600)
+}
+
+func stdinInteractive() bool {
+	st, err := os.Stdin.Stat()
+	return err == nil && st.Mode()&os.ModeCharDevice != 0
+}
+
+func sameModelPath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	return errA == nil && errB == nil && absA == absB
+}
+
+func humanBytes(n int64) string {
+	const unit = int64(1024)
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	value := float64(n)
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	for _, suffix := range units {
+		value /= 1024
+		if value < 1024 || suffix == units[len(units)-1] {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%d B", n)
 }
 
 func splitRoots(v string) []string {

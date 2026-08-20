@@ -12,9 +12,9 @@ import (
 // Bootstrap заполняет то, что можно выяснить самому, при первом запуске.
 //
 // Смысл — простой запуск: `barrymored` без единого флага должен находить
-// llama-server и модели там, где они обычно лежат. Найденное записывается
-// в настройки и перечисляется владельцу: догадка, о которой не сказали,
-// ничем не лучше скрытого решения.
+// комплектный llama-server и модели там, где они обычно лежат. Найденное
+// записывается в настройки и перечисляется владельцу: догадка, о которой не
+// сказали, ничем не лучше скрытого решения.
 //
 // Разрешённые рабочие каталоги сюда не входят намеренно. Доступ к чужим
 // каталогам — не та вещь, которую можно выдать себе по догадке
@@ -42,13 +42,16 @@ func Bootstrap(dataRoot string, s Settings) (Settings, []string) {
 		case err != nil:
 			notes = append(notes, "каталог моделей прочитать не удалось: "+err.Error())
 		case len(found) == 1:
+			// Это предложение для first-run выбора, а не право запустить веса
+			// молча. Интерактивный launcher попросит владельца подтвердить его.
 			s.LocalModel.Path = found[0].Path
-			notes = append(notes, "выбрана единственная найденная модель: "+found[0].Name)
+			notes = append(notes, "найдена единственная модель: "+found[0].Name+
+				"; на первом интерактивном запуске Бэрримор попросит подтвердить её")
 		case len(found) > 1:
 			// Выбирать за владельца из нескольких — самоуправство: модели
 			// различаются размером, скоростью и характером ответов.
 			notes = append(notes, fmt.Sprintf(
-				"моделей найдено %d; какую поднимать — выберите в разделе «Настройки»", len(found)))
+				"моделей найдено %d; какую поднимать — выберите при первом запуске", len(found)))
 		}
 	}
 
@@ -93,11 +96,25 @@ func hasGPU() bool {
 	return false
 }
 
-// findLlamaServer ищет сервер там, где он обычно оказывается.
+// findLlamaServer ищет сервер сначала в самом standalone bundle, затем в
+// developer/user locations. Обычный пользователь не должен собирать llama.cpp:
+// release кладёт совместимый сервер рядом с Barrymore в libexec/.
 func findLlamaServer() string {
-	candidates := []string{
-		"third_party/llama.cpp/build/bin/llama-server",
+	candidates := []string{}
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Dir(exe)
+		candidates = append(candidates, filepath.Join(dir, "libexec", "llama-server"))
+		// Системная раскладка: ~/.local/bin/barrymored +
+		// ~/.local/libexec/barrymore/llama-server.
+		if filepath.Base(dir) == "bin" {
+			candidates = append(candidates,
+				filepath.Join(filepath.Dir(dir), "libexec", "barrymore", "llama-server"))
+		}
 	}
+	candidates = append(candidates,
+		"libexec/llama-server",
+		"third_party/llama.cpp/build/bin/llama-server",
+	)
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates,
 			filepath.Join(home, ".local", "bin", "llama-server"),
@@ -119,12 +136,18 @@ func findLlamaServer() string {
 	return ""
 }
 
-// findModelsDir ищет каталог с весами.
+// findModelsDir ищет каталог с весами. Bundle-local data/local_models идёт
+// первым: после распаковки достаточно положить GGUF туда и запустить ./barrymore.
 func findModelsDir(dataRoot string) string {
-	candidates := []string{
+	candidates := []string{}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates,
+			filepath.Join(filepath.Dir(exe), "data", "local_models"))
+	}
+	candidates = append(candidates,
 		filepath.Join(dataRoot, "models"),
 		"data/local_models",
-	}
+	)
 	if home, err := os.UserHomeDir(); err == nil {
 		candidates = append(candidates,
 			filepath.Join(home, ".local", "share", "barrymore", "models"),

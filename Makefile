@@ -7,6 +7,7 @@ BIN := bin/barrymored
 DATA_ROOT ?= $(CURDIR)/data/runtime
 WORKSPACE_ROOTS ?= $(HOME)/git
 ADDR ?= 127.0.0.1:7717
+DIST_DIR ?= $(CURDIR)/dist/barrymore
 
 # Локальная модель для живого dev-прогона. Это не продуктовая зависимость:
 # модель остаётся сменяемой через настройки. Сейчас пробуем компактную Ornith
@@ -15,12 +16,11 @@ ADDR ?= 127.0.0.1:7717
 LOCAL_MODEL ?= $(CURDIR)/data/local_models/Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf
 
 # Для воспроизводимого live-run путь выбирает Makefile и передаёт его явно.
-# Иначе `-llama-server=` подавляет сохранённый bootstrap-путь, а Resolve при
-# пустом значении ищет меньший набор мест, чем первый запуск Barrymore.
-# Порядок совпадает с bootstrap: vendored build, ~/.local/bin, ~/llama.cpp,
-# затем PATH.
+# Standalone bundle кладёт свой wrapper в libexec/llama-server; dev-путь
+# дополнительно принимает обычную локальную сборку llama.cpp.
 LLAMA_SERVER ?= $(shell \
 	for p in \
+		"$(CURDIR)/libexec/llama-server" \
 		"$(CURDIR)/third_party/llama.cpp/build/bin/llama-server" \
 		"$(HOME)/.local/bin/llama-server" \
 		"$(HOME)/llama.cpp/build/bin/llama-server"; do \
@@ -38,7 +38,7 @@ MODEL_FLAGS ?= -local-model-context 8192 -local-model-threads 14 \
 	-llama-server="$(LLAMA_SERVER)" -provider= -provider-model=local -provider-label=Ornith
 
 .PHONY: help build test test-race vet fmt lint run run-quiet dev install uninstall \
-        clean host-audit rebuild ci e2e ornith-ready
+        clean host-audit rebuild ci e2e ornith-ready bundle
 
 help: ## Показать список целей
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -78,7 +78,7 @@ ornith-ready: ## Проверить окружение первого живог
 	}
 	@printf "модель: "; ls -lh "$(LOCAL_MODEL)" | awk '{print $$5, $$9}'
 	@test -n "$(LLAMA_SERVER)" || { \
-		echo "llama-server не найден ни в third_party, ни в ~/.local/bin, ни в ~/llama.cpp/build/bin, ни в PATH"; \
+		echo "llama-server не найден ни в libexec, ни в third_party, ни в ~/.local/bin, ни в ~/llama.cpp/build/bin, ни в PATH"; \
 		exit 1; \
 	}
 	@test -x "$(LLAMA_SERVER)" || { echo "llama-server не исполняемый: $(LLAMA_SERVER)"; exit 1; }
@@ -93,6 +93,37 @@ run-quiet: build ## Запустить без локальной модели: r
 	$(BIN) -addr $(ADDR) -data-root $(DATA_ROOT) -workspace-roots $(WORKSPACE_ROOTS)
 
 dev: run ## Псевдоним run
+
+# Standalone bundle содержит Barrymore и ровно тот llama-server, который был
+# проверен разработчиком. Веса модели намеренно не копируются: пользователь
+# кладёт выбранный GGUF в data/local_models. Shared libraries из каталога
+# llama-server едут рядом, а wrapper добавляет их в LD_LIBRARY_PATH.
+bundle: build ## Собрать переносимый каталог с Barrymore и llama-server
+	@test -n "$(LLAMA_SERVER)" || { echo "llama-server не найден; сначала соберите llama.cpp"; exit 1; }
+	@test -x "$(LLAMA_SERVER)" || { echo "llama-server не исполняемый: $(LLAMA_SERVER)"; exit 1; }
+	rm -rf "$(DIST_DIR)"
+	install -Dm755 "$(BIN)" "$(DIST_DIR)/barrymore"
+	install -Dm755 "$(LLAMA_SERVER)" "$(DIST_DIR)/libexec/llama-server.bin"
+	@srcdir="$$(dirname "$(LLAMA_SERVER)")"; \
+	for lib in "$$srcdir"/*.so "$$srcdir"/*.so.*; do \
+		test -e "$$lib" || continue; cp -a "$$lib" "$(DIST_DIR)/libexec/"; \
+	done
+	@printf '%s\n' \
+		'#!/bin/sh' \
+		'HERE=$$(CDPATH= cd -- "$$(dirname -- "$$0")" && pwd)' \
+		'export LD_LIBRARY_PATH="$$HERE$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"' \
+		'exec "$$HERE/llama-server.bin" "$$@"' \
+		> "$(DIST_DIR)/libexec/llama-server"
+	@chmod 755 "$(DIST_DIR)/libexec/llama-server"
+	@mkdir -p "$(DIST_DIR)/data/local_models"
+	@printf '%s\n' \
+		'Положите сюда одну или несколько моделей *.gguf.' \
+		'Затем из корня bundle запустите: ./barrymore' \
+		'При первом интерактивном запуске Бэрримор попросит подтвердить или выбрать модель.' \
+		> "$(DIST_DIR)/data/local_models/README.txt"
+	@"$(DIST_DIR)/libexec/llama-server" --version >/dev/null
+	@echo "Standalone bundle готов: $(DIST_DIR)"
+	@echo "Дальше: положите GGUF в $(DIST_DIR)/data/local_models/ и запустите $(DIST_DIR)/barrymore"
 
 install: build ## Поставить бинарник и пользовательскую службу systemd
 	@install -Dm755 $(BIN) $(HOME)/.local/bin/barrymored
