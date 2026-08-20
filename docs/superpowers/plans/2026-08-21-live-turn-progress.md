@@ -48,67 +48,7 @@
 
 ---
 
-### Task 1: Correct token aggregation before exposing telemetry
-
-**Files:**
-- Modify: `internal/conversation/deliberation.go`
-- Test: `internal/conversation/research_loop_test.go`
-
-**Interfaces:**
-- Consumes: existing `aggregateResponse(*model.Response, model.Response)`.
-- Produces: exact-once `PromptTokens`, `CompletionTokens`, and `Latency` totals across deliberation calls.
-
-- [ ] **Step 1: Write the failing multi-call token test**
-
-Extend the scripted provider response with distinct usage values and assert the final reply totals:
-
-```go
-if got := turn.Reply.PromptTokens; got != 30 {
-    t.Fatalf("prompt tokens=%d, want 30", got)
-}
-if got := turn.Reply.OutputTokens; got != 12 {
-    t.Fatalf("output tokens=%d, want 12", got)
-}
-```
-
-- [ ] **Step 2: Run the focused test and observe RED**
-
-Run: `go test ./internal/conversation -run TestResearch.*AggregatesUsageExactlyOnce -count=1`
-
-Expected: FAIL with output tokens `24`, proving the existing duplicate addition.
-
-- [ ] **Step 3: Remove the duplicate aggregation**
-
-Keep exactly one addition per metric:
-
-```go
-func aggregateResponse(dst *model.Response, src model.Response) {
-    dst.Content = src.Content
-    dst.Model = src.Model
-    dst.FinishReason = src.FinishReason
-    dst.PromptTokens += src.PromptTokens
-    dst.CompletionTokens += src.CompletionTokens
-    dst.Latency += src.Latency
-}
-```
-
-- [ ] **Step 4: Verify GREEN**
-
-Run: `go test ./internal/conversation -run 'TestResearch.*AggregatesUsageExactlyOnce|TestResearch' -count=1`
-
-Expected: PASS.
-
-- [ ] **Step 5: Commit and push**
-
-```bash
-git add internal/conversation/deliberation.go internal/conversation/research_loop_test.go
-git commit -m "fix: count deliberation tokens exactly once"
-git push origin master
-```
-
----
-
-### Task 2: Add the durable TurnRun domain and projection
+### Task 1: Add the durable TurnRun domain and projection
 
 **Files:**
 - Create: `internal/store/migrations/0018_conversation_turn_runs.sql`
@@ -245,7 +185,7 @@ git push origin master
 
 ---
 
-### Task 3: Stream provider output privately and expose trustworthy telemetry
+### Task 2: Stream provider output privately and expose trustworthy telemetry
 
 **Files:**
 - Modify: `internal/model/model.go`
@@ -344,7 +284,7 @@ git push origin master
 
 ---
 
-### Task 4: Execute turns under App lifetime and expose async API/SSE
+### Task 3: Execute turns under App lifetime and expose async API/SSE
 
 **Files:**
 - Modify: `internal/app/app.go`
@@ -420,7 +360,7 @@ git push origin master
 
 ---
 
-### Task 5: Render one reload-safe activity row
+### Task 4: Render one reload-safe activity row
 
 **Files:**
 - Create: `internal/api/web/turn-progress.js`
@@ -505,14 +445,14 @@ git push origin master
 
 ---
 
-### Task 6: Full verification, real browser evidence, and status docs
+### Task 5: Full verification, real browser evidence, and status docs
 
 **Files:**
 - Modify: `IMPLEMENTATION_STATUS.md`
 - Modify: `docs/MODERNIZATION_PROGRESS.md`
 
 **Interfaces:**
-- Consumes: complete vertical slice from Tasks 1–5.
+- Consumes: complete vertical slice from Tasks 1–4.
 - Produces: fresh repository and runtime evidence, clean synchronized master.
 
 - [ ] **Step 1: Run focused and full automated gates**

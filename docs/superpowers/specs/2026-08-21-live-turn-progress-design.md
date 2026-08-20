@@ -256,9 +256,10 @@ For a turn with several deliberation/research model calls:
 - current per-call approximate progress resets when another provider call starts,
   while the displayed turn total remains cumulative.
 
-The current `aggregateResponse` adds `CompletionTokens` twice. The implementation
-must first add a regression test and remove the duplicate addition; otherwise
-all new output-token telemetry would be wrong by a factor of two.
+The existing three-call research-loop regression test confirms that
+`aggregateResponse` already sums prompt and completion tokens exactly once
+(`30` prompt and `15` output for three `10`/`5` calls). New TurnRun/provider
+telemetry tests must preserve that established behaviour.
 
 ## 9. UI behaviour
 
