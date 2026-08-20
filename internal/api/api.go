@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -126,12 +127,32 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("/", s.ui())
 
-	return withCommonHeaders(mux)
+	return withCommonHeaders(mux, s.log)
 }
 
 // withCommonHeaders закрывает страницу от встраивания и определения типа.
-func withCommonHeaders(next http.Handler) http.Handler {
+//
+// net/http сам перехватывает panic в handler, но при этом намеренно закрывает
+// соединение. Для браузера длинный запрос к локальной модели тогда выглядит как
+// безымянный NetworkError. Здесь panic перехватывается раньше: stack trace
+// остаётся в журнале Barrymore, а клиент получает нормальный problem+json.
+func withCommonHeaders(next http.Handler, log *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				if log == nil {
+					log = slog.Default()
+				}
+				log.Error("panic в HTTP handler",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"panic", fmt.Sprint(recovered),
+					"stack", string(debug.Stack()))
+				writeProblem(w, http.StatusInternalServerError,
+					"внутренняя ошибка",
+					"обработчик запроса аварийно завершился; подробности записаны в журнал Бэрримора")
+			}
+		}()
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -218,73 +239,34 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	from := int64(0)
-	if v := r.Header.Get("Last-Event-ID"); v != "" {
-		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
-			from = parsed
-		}
-	}
-	if v := r.URL.Query().Get("from"); v != "" {
-		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil {
-			from = parsed
+	if raw := r.Header.Get("Last-Event-ID"); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			from = n
 		}
 	}
 
-	sub, backlog, err := s.app.Journal.Broker().Subscribe(r.Context(), s.app.Journal, from, 256)
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "подписка не создана", err.Error())
-		return
-	}
-	defer sub.Close()
+	ctx := r.Context()
+	seq := from
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	last := from
-	send := func(env event.Envelope) bool {
-		if env.Seq <= last {
-			return true // уже доставлено; дубликат отбрасывается по seq
-		}
-		data, err := json.Marshal(env)
-		if err != nil {
-			return true
-		}
-		if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n",
-			env.Seq, env.EventType, data); err != nil {
-			return false
-		}
-		last = env.Seq
-		flusher.Flush()
-		return true
-	}
-
-	for _, env := range backlog {
-		if !send(env) {
-			return
-		}
-	}
-
-	keepalive := time.NewTicker(20 * time.Second)
-	defer keepalive.Stop()
-
+	// Сначала дочитываем журнал, потом ждём уведомлений. Уведомление — только
+	// подсказка перечитать базу: канал может схлопнуть несколько записей, но
+	// sequence в базе не теряется.
 	for {
-		select {
-		case <-r.Context().Done():
+		events, err := s.app.Journal.After(ctx, seq, 200)
+		if err != nil {
 			return
-		case env, ok := <-sub.C:
-			if !ok {
-				return
-			}
-			if !send(env) {
-				return
-			}
-		case <-keepalive.C:
-			// Комментарий SSE держит соединение и не мешает разбору.
-			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
-				return
-			}
-			flusher.Flush()
+		}
+		for _, env := range events {
+			data, _ := json.Marshal(env)
+			fmt.Fprintf(w, "id: %d\nevent: journal\ndata: %s\n\n", env.Sequence, data)
+			seq = env.Sequence
+		}
+		flusher.Flush()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.app.Journal.Notify():
 		}
 	}
 }
@@ -292,11 +274,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 // ---------- нити ----------
 
 func (s *Server) listThreads(w http.ResponseWriter, r *http.Request) {
-	var states []string
-	if v := r.URL.Query().Get("state"); v != "" {
-		states = strings.Split(v, ",")
-	}
-	items, err := s.app.Threads.List(r.Context(), thread.ListFilter{States: states})
+	items, err := s.app.Threads.List(r.Context(), r.URL.Query().Get("state"), 100)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "нити недоступны", err.Error())
 		return
@@ -304,18 +282,26 @@ func (s *Server) listThreads(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) getThread(w http.ResponseWriter, r *http.Request) {
+	d, err := s.app.Threads.Detail(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeDomainError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, d)
+}
+
 func (s *Server) createThread(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Title   string `json:"title"`
-		Kind    string `json:"kind"`
-		Summary string `json:"summary"`
-		Origin  string `json:"origin"`
+		Title  string `json:"title"`
+		Kind   string `json:"kind"`
+		Origin string `json:"origin"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
 	th, err := s.app.Threads.Create(r.Context(), thread.CreateRequest{
-		Title: body.Title, Kind: body.Kind, Summary: body.Summary, Origin: body.Origin,
+		Title: body.Title, Kind: body.Kind, Origin: body.Origin,
 		Actor: event.Actor{Type: event.ActorPerson},
 	})
 	if err != nil {
@@ -325,51 +311,18 @@ func (s *Server) createThread(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, th)
 }
 
-func (s *Server) getThread(w http.ResponseWriter, r *http.Request) {
-	d, err := s.app.Threads.Detail(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeDomainError(w, err)
-		return
-	}
-	orders, err := s.app.Delegation.List(r.Context(), d.Thread.ID, 50)
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "поручения недоступны", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"thread": d, "work_orders": orders})
-}
-
 func (s *Server) patchThread(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Title            *string `json:"title"`
-		Summary          *string `json:"summary"`
-		State            string  `json:"state"`
-		Reason           string  `json:"reason"`
-		ExpectedRevision *int64  `json:"expected_revision"`
+		Title    *string `json:"title"`
+		State    *string `json:"state"`
+		Priority *int    `json:"priority"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	id := r.PathValue("id")
-	rev := event.AnyRevision
-	if body.ExpectedRevision != nil {
-		rev = *body.ExpectedRevision
-	}
-
-	if body.State != "" {
-		th, err := s.app.Threads.ChangeState(r.Context(), id, body.State, body.Reason, rev,
-			event.Actor{Type: event.ActorPerson})
-		if err != nil {
-			writeDomainError(w, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, th)
-		return
-	}
-
-	th, err := s.app.Threads.Update(r.Context(), id, thread.UpdateRequest{
-		Title: body.Title, Summary: body.Summary,
-		ExpectedRevision: rev, Actor: event.Actor{Type: event.ActorPerson},
+	th, err := s.app.Threads.Update(r.Context(), r.PathValue("id"), thread.UpdateRequest{
+		Title: body.Title, State: body.State, Priority: body.Priority,
+		Actor: event.Actor{Type: event.ActorPerson},
 	})
 	if err != nil {
 		writeDomainError(w, err)
@@ -388,31 +341,27 @@ func (s *Server) addPosition(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	pos, err := s.app.Threads.SetPosition(r.Context(), r.PathValue("id"), thread.PositionRequest{
-		Owner: body.Owner, Statement: body.Statement,
-		Confidence: body.Confidence, Basis: body.Basis,
+	p, err := s.app.Threads.SetPosition(r.Context(), r.PathValue("id"), thread.PositionRequest{
+		Owner: body.Owner, Statement: body.Statement, Confidence: body.Confidence,
+		Basis: body.Basis, Actor: event.Actor{Type: event.ActorPerson},
 	})
 	if err != nil {
 		writeDomainError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, pos)
+	writeJSON(w, http.StatusCreated, p)
 }
 
 func (s *Server) addDecision(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Statement    string   `json:"statement"`
-		DecidedBy    string   `json:"decided_by"`
-		Rationale    string   `json:"rationale"`
-		Alternatives []string `json:"alternatives"`
+		Summary string `json:"summary"`
+		By      string `json:"by"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	d, err := s.app.Threads.RecordDecision(r.Context(), r.PathValue("id"), thread.DecisionRequest{
-		Statement: body.Statement, DecidedBy: body.DecidedBy,
-		Rationale: body.Rationale, Alternatives: body.Alternatives,
-	})
+	d, err := s.app.Threads.Decide(r.Context(), r.PathValue("id"),
+		body.Summary, body.By, event.Actor{Type: event.ActorPerson})
 	if err != nil {
 		writeDomainError(w, err)
 		return
@@ -620,24 +569,7 @@ func (s *Server) orderReport(w http.ResponseWriter, r *http.Request) {
 		writeDomainError(w, err)
 		return
 	}
-	if len(d.Runs) == 0 {
-		writeProblem(w, http.StatusNotFound, "отчёта нет", "поручение ещё не запускалось")
-		return
-	}
-	last := d.Runs[len(d.Runs)-1]
-	report, ok := delegation.ParseReport(last.RunDir)
-	if !ok {
-		writeProblem(w, http.StatusNotFound, "отчёта нет",
-			"исполнитель не оставил разбираемого отчёта")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"report":        report,
-		"verifications": d.Verifications,
-		// Отчёт исполнителя — заявление, а не факт: рядом всегда идут проверки.
-		"note": "содержимое отчёта не является подтверждённым фактом; " +
-			"состояние поручения определяют проверки",
-	})
+	writeJSON(w, http.StatusOK, d)
 }
 
 // ---------- подтверждения ----------
@@ -652,14 +584,17 @@ func (s *Server) pendingApprovals(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) grantApproval(w http.ResponseWriter, r *http.Request) {
-	a, err := s.app.Delegation.Approve(r.Context(), r.PathValue("id"), "owner",
+	var body struct {
+		Note string `json:"note"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	o, err := s.app.Delegation.Grant(r.Context(), r.PathValue("id"), body.Note,
 		event.Actor{Type: event.ActorPerson})
 	if err != nil {
-		writeProblem(w, http.StatusConflict, "подтверждение не выдано", err.Error())
+		writeProblem(w, http.StatusConflict, "подтверждение не принято", err.Error())
 		return
 	}
-	s.withdrawNotice("approval_waiting:"+a.WorkOrderID, "владелец подтвердил поручение")
-	writeJSON(w, http.StatusOK, a)
+	writeJSON(w, http.StatusOK, o)
 }
 
 func (s *Server) denyApproval(w http.ResponseWriter, r *http.Request) {
@@ -667,26 +602,22 @@ func (s *Server) denyApproval(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	a, err := s.app.Delegation.Deny(r.Context(), r.PathValue("id"), "owner", body.Reason,
-		event.Actor{Type: event.ActorPerson})
-	if err != nil {
-		writeProblem(w, http.StatusConflict, "решение не записано", err.Error())
+	if body.Reason == "" {
+		body.Reason = "владелец отказал"
+	}
+	if err := s.app.Delegation.Deny(r.Context(), r.PathValue("id"), body.Reason,
+		event.Actor{Type: event.ActorPerson}); err != nil {
+		writeProblem(w, http.StatusConflict, "подтверждение не отклонено", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, a)
+	writeJSON(w, http.StatusOK, map[string]any{"status": "denied"})
 }
 
-// ---------- предиктивный контур ----------
+// ---------- наблюдение ----------
 
 func (s *Server) listExpectations(w http.ResponseWriter, r *http.Request) {
-	subjectType := r.URL.Query().Get("subject_type")
-	subjectID := r.URL.Query().Get("subject_id")
-	if subjectType == "" || subjectID == "" {
-		writeProblem(w, http.StatusBadRequest, "не хватает параметров",
-			"укажите subject_type и subject_id")
-		return
-	}
-	items, err := s.app.Runtime.Expectations(r.Context(), subjectType, subjectID)
+	items, err := s.app.Runtime.Expectations(r.Context(), r.URL.Query().Get("subject_type"),
+		r.URL.Query().Get("subject_id"))
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "ожидания недоступны", err.Error())
 		return
@@ -695,22 +626,13 @@ func (s *Server) listExpectations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listDiscrepancies(w http.ResponseWriter, r *http.Request) {
-	openOnly := r.URL.Query().Get("open") != "false"
-	items, err := s.app.Runtime.Discrepancies(r.Context(), openOnly, 200)
+	openOnly := r.URL.Query().Get("all") != "true"
+	items, err := s.app.Runtime.Discrepancies(r.Context(), openOnly, 100)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "расхождения недоступны", err.Error())
 		return
 	}
-	out := make([]map[string]any, 0, len(items))
-	for _, d := range items {
-		attempts, err := s.app.Runtime.Attempts(r.Context(), d.ID)
-		if err != nil {
-			writeProblem(w, http.StatusInternalServerError, "попытки недоступны", err.Error())
-			return
-		}
-		out = append(out, map[string]any{"discrepancy": d, "attempts": attempts})
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": out})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) ackDiscrepancy(w http.ResponseWriter, r *http.Request) {
@@ -718,23 +640,17 @@ func (s *Server) ackDiscrepancy(w http.ResponseWriter, r *http.Request) {
 		Note string `json:"note"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
-	if err := s.app.Runtime.AcknowledgeDiscrepancy(r.Context(), r.PathValue("id"), body.Note,
+	if err := s.app.Runtime.Acknowledge(r.Context(), r.PathValue("id"), body.Note,
 		event.Actor{Type: event.ActorPerson}); err != nil {
-		writeProblem(w, http.StatusBadRequest, "расхождение не отмечено", err.Error())
+		writeProblem(w, http.StatusConflict, "расхождение не подтверждено", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "acknowledged"})
 }
 
 func (s *Server) listObservations(w http.ResponseWriter, r *http.Request) {
-	subjectType := r.URL.Query().Get("subject_type")
-	subjectID := r.URL.Query().Get("subject_id")
-	if subjectType == "" || subjectID == "" {
-		writeProblem(w, http.StatusBadRequest, "не хватает параметров",
-			"укажите subject_type и subject_id")
-		return
-	}
-	items, err := s.app.Runtime.Observations(r.Context(), subjectType, subjectID, 300)
+	items, err := s.app.Runtime.Observations(r.Context(), r.URL.Query().Get("subject_type"),
+		r.URL.Query().Get("subject_id"), 200)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "наблюдения недоступны", err.Error())
 		return
@@ -751,8 +667,8 @@ func (s *Server) listConversations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items":    items,
 		"provider": s.app.Talk.ProviderStatus(r.Context()),
+		"items":    items,
 	})
 }
 
@@ -982,124 +898,33 @@ func (s *Server) selectLocalModel(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-
-	next := s.app.LocalModel.Spec()
-	if body.Path != nil {
-		next.ModelPath = strings.TrimSpace(*body.Path)
-	}
-	if body.ContextSize != nil {
-		next.ContextSize = *body.ContextSize
-	}
-	if body.Threads != nil {
-		next.Threads = *body.Threads
-	}
-	if body.GPULayers != nil {
-		next.GPULayers = *body.GPULayers
-	}
-	if body.CPUMoE != nil {
-		next.CPUMoE = *body.CPUMoE
-	}
-
-	if err := s.app.LocalModel.Reconfigure(r.Context(), next); err != nil {
-		writeProblem(w, http.StatusConflict, "модель не выбрана", err.Error())
-		return
-	}
-
-	// Выбор сохраняется сразу: перезапуск Бэрримора не должен возвращать
-	// прежнюю модель, будто владелец ничего не решал.
-	if _, err := s.app.Settings.Update(func(cur app.Settings) app.Settings {
-		cur.LocalModel.Path = next.ModelPath
-		cur.LocalModel.Binary = next.Binary
-		cur.LocalModel.Port = next.Port
-		cur.LocalModel.ContextSize = next.ContextSize
-		cur.LocalModel.Threads = next.Threads
-		cur.LocalModel.GPULayers = next.GPULayers
-		cur.LocalModel.CPUMoE = next.CPUMoE
-		cur.LocalModel.ModelsDir = s.app.Config.ModelsDir
-		return cur
-	}); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "выбор не сохранён", err.Error())
-		return
-	}
-
-	if next.ModelPath != "" {
-		go func() {
-			if _, err := s.app.LocalModel.Ensure(context.WithoutCancel(r.Context())); err != nil {
-				s.app.Log.Warn("выбранная модель не поднялась", "error", err)
-			}
-		}()
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"status": "selected",
-		"note": "модель выбрана и поднимается; загрузка весов занимает минуты, " +
-			"состояние видно в разделе «Состояние»",
+	st, err := s.app.LocalModel.Select(r.Context(), localmodel.SelectRequest{
+		ModelPath: body.Path, ContextSize: body.ContextSize, Threads: body.Threads,
+		GPULayers: body.GPULayers, CPUMoE: body.CPUMoE,
 	})
+	if err != nil {
+		writeProblem(w, http.StatusConflict, "модель не переключена", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
 }
 
 // ---------- настройки ----------
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
-	cur := s.app.Settings.Get()
-	spec := s.app.LocalModel.Spec()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"settings":  cur,
-		"path":      s.app.Settings.Path(),
-		"data_root": s.app.Config.DataRoot,
-		"addr":      s.app.Config.Addr,
-		"local_model": map[string]any{
-			"path": spec.ModelPath, "port": spec.Port, "context_size": spec.ContextSize,
-			"threads": spec.Threads, "gpu_layers": spec.GPULayers, "cpu_moe": spec.CPUMoE,
-			"models_dir": s.app.Config.ModelsDir,
-		},
-		"workspace_roots": s.app.Policy.Roots(),
-		"model_policy":    s.app.Delegation.ModelPolicy().Describe(),
-		"model_policies":  app.ModelPolicyChoices(),
-		"memory_policy":   s.app.Memory.Policy().Describe(),
-		// Часть настроек применяется только при запуске. Молчать об этом
-		// значило бы дать владельцу поменять то, что не поменяется.
-		"restart_required": []string{
-			"адрес прослушивания", "порт локальной модели", "режим памяти",
-		},
-	})
-}
-
-// setModelPolicy меняет допустимую стоимость моделей.
-//
-// Решение владельца о собственных деньгах должно действовать сразу и быть
-// записанным: политика уходит и в работающую службу, и в файл настроек.
-func (s *Server) setModelPolicy(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name string `json:"name"`
-	}
-	if !decode(w, r, &body) {
-		return
-	}
-	p, err := worker.ParseModelPolicy(body.Name)
+	views, err := s.app.Registry.List(r.Context())
 	if err != nil {
-		writeProblem(w, http.StatusBadRequest, "политика не принята", err.Error())
-		return
-	}
-	s.app.Delegation.SetModelPolicy(p)
-
-	name := strings.ToLower(strings.TrimSpace(body.Name))
-	if _, err := s.app.Settings.Update(func(cur app.Settings) app.Settings {
-		cur.ModelPolicy = name
-		return cur
-	}); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "настройка не сохранена", err.Error())
+		writeProblem(w, http.StatusInternalServerError, "настройки недоступны", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"model_policy": p.Describe(),
-		"note": "действует сразу; уже созданные поручения сохраняют выбранную " +
-			"им модель — подтверждали именно её",
+		"workspace_roots": s.app.Policy.Roots(),
+		"model_policy":    s.app.Config.ModelPolicy.Describe(),
+		"workers":         views,
+		"local_model":     s.app.LocalModel.State(),
 	})
 }
 
-// addWorkspaceRoot разрешает исполнителям видеть ещё один каталог.
-//
-// Действует сразу и на уже предложенные поручения тоже: ждать перезапуска
-// ради собственного решения владельцу незачем.
 func (s *Server) addWorkspaceRoot(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Path string `json:"path"`
@@ -1107,41 +932,54 @@ func (s *Server) addWorkspaceRoot(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &body) {
 		return
 	}
-	abs, err := app.CheckRoot(body.Path)
+	roots, err := s.app.Settings.AddWorkspaceRoot(body.Path)
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "каталог не разрешён", err.Error())
 		return
 	}
-	roots := s.app.Policy.SetRoots(append(s.app.Policy.Roots(), abs))
-	s.persistRoots(w, roots)
+	s.app.Policy.SetRoots(roots)
+	writeJSON(w, http.StatusOK, map[string]any{"workspace_roots": roots})
 }
 
 func (s *Server) removeWorkspaceRoot(w http.ResponseWriter, r *http.Request) {
-	target := r.URL.Query().Get("path")
-	kept := []string{}
-	for _, root := range s.app.Policy.Roots() {
-		if root != target {
-			kept = append(kept, root)
-		}
+	var body struct {
+		Path string `json:"path"`
 	}
-	roots := s.app.Policy.SetRoots(kept)
-	s.persistRoots(w, roots)
-}
-
-// persistRoots сохраняет список и отвечает им же.
-func (s *Server) persistRoots(w http.ResponseWriter, roots []string) {
-	if _, err := s.app.Settings.Update(func(cur app.Settings) app.Settings {
-		cur.WorkspaceRoots = roots
-		return cur
-	}); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "список не сохранён", err.Error())
+	if !decode(w, r, &body) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"workspace_roots": roots,
-		"note": "изменение действует немедленно; на уже запущенные процессы " +
-			"оно не влияет — их изоляция задана при старте",
-	})
+	roots, err := s.app.Settings.RemoveWorkspaceRoot(body.Path)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "каталог не убран", err.Error())
+		return
+	}
+	s.app.Policy.SetRoots(roots)
+	writeJSON(w, http.StatusOK, map[string]any{"workspace_roots": roots})
+}
+
+func (s *Server) setModelPolicy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		AllowFree         bool `json:"allow_free"`
+		AllowSubscription bool `json:"allow_subscription"`
+		AllowPaid         bool `json:"allow_paid"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	p := worker.CostPolicy{
+		AllowFree: body.AllowFree, AllowSubscription: body.AllowSubscription,
+		AllowPaid: body.AllowPaid,
+	}
+	if err := p.Validate(); err != nil {
+		writeProblem(w, http.StatusBadRequest, "политика стоимости не сохранена", err.Error())
+		return
+	}
+	if err := s.app.Settings.SetModelPolicy(p); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "политика не сохранена", err.Error())
+		return
+	}
+	s.app.Config.ModelPolicy.Set(p)
+	writeJSON(w, http.StatusOK, p)
 }
 
 func (s *Server) setWorkerEnabled(w http.ResponseWriter, r *http.Request) {
