@@ -136,7 +136,7 @@ func (s *Service) Start(ctx context.Context, threadID, title string) (Conversati
 		if _, err := w.Append(ctx, event.Request{
 			StreamType: StreamType, StreamID: c.ID, ExpectedRevision: 0,
 			EventType: EvConversationStarted,
-			Actor: event.Actor{Type: event.ActorPerson}, Payload: c,
+			Actor:     event.Actor{Type: event.ActorPerson}, Payload: c,
 		}); err != nil {
 			return err
 		}
@@ -230,11 +230,11 @@ func (s *Service) Send(ctx context.Context, conversationID, text string) (Turn, 
 
 	if proposal.ThreadPosition != nil && conv.ThreadID != "" {
 		if _, err := s.threads.SetPosition(ctx, conv.ThreadID, thread.PositionRequest{
-			Owner: thread.OwnerBarrymore,
-			Statement: proposal.ThreadPosition.Statement,
+			Owner:      thread.OwnerBarrymore,
+			Statement:  proposal.ThreadPosition.Statement,
 			Confidence: proposal.ThreadPosition.Confidence,
-			Basis: proposal.ThreadPosition.Basis,
-			Actor: event.Actor{Type: event.ActorBarrymore},
+			Basis:      proposal.ThreadPosition.Basis,
+			Actor:      event.Actor{Type: event.ActorBarrymore},
 		}); err != nil {
 			s.log.Error("позиция по нити не записана", "thread", conv.ThreadID, "error", err)
 		}

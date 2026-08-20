@@ -72,11 +72,11 @@ func TestOldSourceEventWithoutFreshnessStillReplays(t *testing.T) {
 	// Такой журнал обязан оставаться воспроизводимым после обновления.
 	_, err = journal.Write(ctx, func(_ *sql.Tx, w *event.TxWriter) error {
 		_, err := w.Append(ctx, event.Request{
-			StreamType: experience.StreamEpisode,
-			StreamID: ep.ID,
+			StreamType:       experience.StreamEpisode,
+			StreamID:         ep.ID,
 			ExpectedRevision: event.AnyRevision,
-			EventType: experience.EvSourceRecorded,
-			Actor: event.Actor{Type: event.ActorRuntime},
+			EventType:        experience.EvSourceRecorded,
+			Actor:            event.Actor{Type: event.ActorRuntime},
 			Payload: map[string]any{
 				"id": "src_legacy", "episode_id": ep.ID, "kind": "legacy.read",
 				"evidence": "старое наблюдение", "confidence": 1,

@@ -181,10 +181,10 @@ func RegisterProviderInspector(r *Registry, provider model.Provider, clk clock.C
 		now := clk.Now()
 		data, err := json.Marshal(map[string]any{
 			"provider": provider.Describe(),
-			"status": st.Status,
+			"status":   st.Status,
 			"endpoint": st.Endpoint,
-			"model": st.Model,
-			"reason": st.Reason,
+			"model":    st.Model,
+			"reason":   st.Reason,
 		})
 		if err != nil {
 			return Result{}, err

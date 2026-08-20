@@ -35,12 +35,13 @@ func (s *Service) deliberate(ctx context.Context, conv Conversation, question st
 	var steps []experience.Step
 	seen := map[string]bool{}
 	successes, failures := 0, 0
+	forceFinalNext := false
 	var trace []string
 
 	for call := 0; ; call++ {
 		// After maxResearchSteps observations there is one last model call, but
 		// no more tools. It must answer from the evidence it already has.
-		forceFinal := call >= maxResearchSteps
+		forceFinal := call >= maxResearchSteps || forceFinalNext
 		callSections := sections
 		if forceFinal {
 			callSections = append(append([]ContextSection(nil), sections...), ContextSection{
@@ -102,9 +103,18 @@ func (s *Service) deliberate(ctx context.Context, conv Conversation, question st
 		step := experience.Step{
 			Capability: capID, Purpose: strings.TrimSpace(proposal.Research.Why), Args: args,
 		}
-		steps = append(steps, step)
 
 		if seen[key] {
+			if successes > 0 {
+				// The capability already produced fresh evidence on this turn. A
+				// repeated request is a stalled deliberation, not a failed probe:
+				// runtime did not execute anything that could fail. Give the model
+				// one forced-final call and preserve the successful route as a
+				// reusable Procedure.
+				forceFinalNext = true
+				trace = append(trace, "research "+capID+": повтор после evidence остановил исследование")
+				continue
+			}
 			failures++
 			msg := "Повтор того же исследовательского шага отклонён: " + capID
 			sections = append(sections, researchFailureSection(capID, msg))
@@ -113,6 +123,7 @@ func (s *Service) deliberate(ctx context.Context, conv Conversation, question st
 			continue
 		}
 		seen[key] = true
+		steps = append(steps, step)
 
 		res, err := s.research.Execute(ctx, research.Request{
 			CapabilityID: capID, Args: args, Why: proposal.Research.Why,
@@ -260,8 +271,8 @@ func (s *Service) finishTurnEpisode(ctx context.Context, conv Conversation, ep *
 			Intent: intent, Title: "Повторить исследование: " + strings.TrimSpace(question),
 			SourceEpisodeID: ep.ID, Steps: steps, RequiredCapabilities: ids,
 			ExpectedResult: "актуальное evidence для ответа владельцу",
-			Verification: []string{"получить новое evidence, не использовать старый volatile/realtime result"},
-			RiskClass: experience.RiskReadOnly, Status: experience.ProcedureActive,
+			Verification:   []string{"получить новое evidence, не использовать старый volatile/realtime result"},
+			RiskClass:      experience.RiskReadOnly, Status: experience.ProcedureActive,
 		}
 		if old, err := s.experience.ProceduresByIntent(ctx, intent, 1); err == nil && len(old) > 0 {
 			proc.ID = old[0].ID

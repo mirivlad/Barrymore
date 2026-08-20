@@ -13,8 +13,8 @@ import (
 
 type fakeProvider struct{ status model.Status }
 
-func (p *fakeProvider) ID() string       { return "fake" }
-func (p *fakeProvider) Describe() string { return "Ornith local" }
+func (p *fakeProvider) ID() string                         { return "fake" }
+func (p *fakeProvider) Describe() string                   { return "Ornith local" }
 func (p *fakeProvider) Probe(context.Context) model.Status { return p.status }
 func (p *fakeProvider) Complete(context.Context, model.Request) (model.Response, error) {
 	return model.Response{}, nil

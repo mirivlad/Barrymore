@@ -59,6 +59,9 @@ func TestUnknownCurrentStateIsResearchedBeforeFinalReply(t *testing.T) {
 		`{"reply":"Проверю, какая модель реально отвечает сейчас.",` +
 			`"research":{"capability_id":"runtime.provider.inspect","args":{},"why":"нужно текущее, а не запомненное состояние"},` +
 			`"memory_candidates":[],"own_actions":[],"work_order_proposals":[],"open_questions":[]}`,
+		`{"reply":"Fresh evidence уже достаточно; повторять probe не нужно.",` +
+			`"research":{"capability_id":"runtime.provider.inspect","args":{},"why":"слабая модель повторила уже выполненный шаг"},` +
+			`"memory_candidates":[],"own_actions":[],"work_order_proposals":[],"open_questions":[]}`,
 		`{"reply":"Сейчас мои ответы формулирует локальная Ornith 1.5 9B.",` +
 			`"research":{"capability_id":"","args":{},"why":"evidence уже получено"},` +
 			`"memory_candidates":[],"own_actions":[],"work_order_proposals":[],"open_questions":[]}`,
@@ -82,8 +85,8 @@ func TestUnknownCurrentStateIsResearchedBeforeFinalReply(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if prov.calls != 2 {
-		t.Fatalf("модель вызвана %d раз, ожидалось исследование + финал", prov.calls)
+	if prov.calls != 3 {
+		t.Fatalf("модель вызвана %d раз, ожидалось исследование + ошибочный повтор + финал", prov.calls)
 	}
 	if prov.probes != 1 {
 		t.Fatalf("provider probe вызван %d раз, ожидался один свежий probe", prov.probes)
@@ -108,7 +111,7 @@ func TestUnknownCurrentStateIsResearchedBeforeFinalReply(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("промежуточный research draft попал в историю: сообщений=%d", len(msgs))
 	}
-	if msgs[1].PromptTokens != 20 || msgs[1].OutputTokens != 10 {
+	if msgs[1].PromptTokens != 30 || msgs[1].OutputTokens != 15 {
 		t.Fatalf("стоимость research loop не агрегирована: %+v", msgs[1])
 	}
 
@@ -134,7 +137,10 @@ func TestUnknownCurrentStateIsResearchedBeforeFinalReply(t *testing.T) {
 		t.Fatalf("успешный способ не стал procedural memory: %+v", procedures)
 	}
 
-	if len(prov.last) != 2 || !strings.Contains(prov.last[1].System, "Новое evidence исследования") {
-		t.Fatal("второй deliberation не получил результат исследования")
+	if len(prov.last) != 3 || !strings.Contains(prov.last[1].System, "Новое evidence исследования") {
+		t.Fatal("следующий deliberation не получил результат исследования")
+	}
+	if !strings.Contains(prov.last[2].System, "Новых исследовательских шагов") {
+		t.Fatal("после повтора успешного probe модель не была принуждена к финальному ответу")
 	}
 }
