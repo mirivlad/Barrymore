@@ -38,7 +38,7 @@ if (talkTop && historyButton) {
       if (conversation.status === "ready") {
         show("Бэрримор готов", "ok");
       } else if (model.loading) {
-        show("Ornith загружается…", "warn");
+        show("локальная модель загружается…", "warn");
       } else if (model.configured && !model.serving) {
         show("модель не отвечает", "bad");
       } else if (conversation.status === "not_configured") {
