@@ -19,12 +19,14 @@ LOCAL_MODEL ?= $(CURDIR)/data/local_models/Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf
 # пустом значении ищет меньший набор мест, чем первый запуск Barrymore.
 # Порядок совпадает с bootstrap: vendored build, ~/.local/bin, ~/llama.cpp,
 # затем PATH.
-LLAMA_SERVER ?= $(or \
-	$(firstword $(wildcard \
-		$(CURDIR)/third_party/llama.cpp/build/bin/llama-server \
-		$(HOME)/.local/bin/llama-server \
-		$(HOME)/llama.cpp/build/bin/llama-server)), \
-	$(shell command -v llama-server 2>/dev/null))
+LLAMA_SERVER ?= $(shell \
+	for p in \
+		"$(CURDIR)/third_party/llama.cpp/build/bin/llama-server" \
+		"$(HOME)/.local/bin/llama-server" \
+		"$(HOME)/llama.cpp/build/bin/llama-server"; do \
+		if test -x "$$p"; then printf '%s\n' "$$p"; exit 0; fi; \
+	done; \
+	command -v llama-server 2>/dev/null || true)
 
 # Первый bring-up на 8 ГБ VRAM намеренно начинается с 8K контекста: сначала
 # проверяем поведение и скорость, затем поднимаем окно по фактической памяти.
