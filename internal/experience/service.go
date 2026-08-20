@@ -52,7 +52,7 @@ func (s *Service) Begin(ctx context.Context, req StartRequest, actor event.Actor
 		Status: EpisodeOpen, InitialContext: initial,
 		StartedAt: now, CreatedAt: now, UpdatedAt: now,
 	}
-	_, err := s.journal.Write(ctx, func(tx *sql.Tx, w *event.TxWriter) error {
+	_, err = s.journal.Write(ctx, func(tx *sql.Tx, w *event.TxWriter) error {
 		if _, err := w.Append(ctx, event.Request{
 			StreamType: StreamEpisode, StreamID: ep.ID, ExpectedRevision: 0,
 			EventType: EvEpisodeStarted, Actor: actor, CorrelationID: req.ThreadID,
