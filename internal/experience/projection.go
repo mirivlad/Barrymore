@@ -66,13 +66,32 @@ func projectEpisodeStarted(ctx context.Context, tx *sql.Tx, env event.Envelope) 
 	return applyEpisodeStarted(ctx, tx, ep)
 }
 
+func sourceStability(src Source) (string, error) {
+	stability := strings.TrimSpace(src.Stability)
+	if stability == "" {
+		// Events recorded before source freshness became explicit do not carry
+		// the field. They must remain replayable after migration 0016.
+		return StabilityStable, nil
+	}
+	switch stability {
+	case StabilityImmutable, StabilityStable, StabilityVolatile, StabilityRealtime:
+		return stability, nil
+	default:
+		return "", fmt.Errorf("неизвестная свежесть источника %q", stability)
+	}
+}
+
 func applySourceRecorded(ctx context.Context, tx *sql.Tx, src Source) error {
-	_, err := tx.ExecContext(ctx, `
+	stability, err := sourceStability(src)
+	if err != nil {
+		return fmt.Errorf("проекция источника %s: %w", src.ID, err)
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO experience_sources (
-			id, episode_id, kind, locator, title, evidence, confidence, observed_at, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, episode_id, kind, locator, title, evidence, confidence, stability, observed_at, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		src.ID, src.EpisodeID, src.Kind, src.Locator, src.Title, src.Evidence,
-		src.Confidence, ts(src.ObservedAt), ts(src.CreatedAt))
+		src.Confidence, stability, ts(src.ObservedAt), ts(src.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("проекция источника %s: %w", src.ID, err)
 	}
@@ -296,7 +315,7 @@ func (s *Service) Episode(ctx context.Context, id string) (Episode, error) {
 
 func (s *Service) Sources(ctx context.Context, episodeID string) ([]Source, error) {
 	rows, err := s.db.Reader().QueryContext(ctx, `
-		SELECT id, episode_id, kind, locator, title, evidence, confidence, observed_at, created_at
+		SELECT id, episode_id, kind, locator, title, evidence, confidence, stability, observed_at, created_at
 		FROM experience_sources WHERE episode_id = ? ORDER BY observed_at, id`, episodeID)
 	if err != nil {
 		return nil, err
@@ -307,7 +326,7 @@ func (s *Service) Sources(ctx context.Context, episodeID string) ([]Source, erro
 		var src Source
 		var observed, created string
 		if err := rows.Scan(&src.ID, &src.EpisodeID, &src.Kind, &src.Locator, &src.Title,
-			&src.Evidence, &src.Confidence, &observed, &created); err != nil {
+			&src.Evidence, &src.Confidence, &src.Stability, &observed, &created); err != nil {
 			return nil, err
 		}
 		if src.ObservedAt, err = parseTS(observed); err != nil {
