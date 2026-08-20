@@ -25,6 +25,14 @@ if (talkTop && historyButton) {
     presence.title = text;
   }
 
+  function modelDefinitelyBroken(model) {
+    const reason = String(model?.reason || "").toLowerCase();
+    return reason.includes("поднять нечем") ||
+      reason.includes("не работает") ||
+      reason.includes("не найден") ||
+      reason.includes("недоступен");
+  }
+
   async function refresh() {
     if (loading || document.hidden) return;
     loading = true;
@@ -40,7 +48,8 @@ if (talkTop && historyButton) {
       } else if (model.loading) {
         show("локальная модель загружается…", "warn");
       } else if (model.configured && !model.serving) {
-        show("модель не отвечает", "bad");
+        if (modelDefinitelyBroken(model)) show("модель не отвечает", "bad");
+        else show("локальная модель запускается…", "warn");
       } else if (conversation.status === "not_configured") {
         show("разговор не настроен", "warn");
       } else if (conversation.status === "unreachable" || conversation.status === "broken") {
