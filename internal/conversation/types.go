@@ -210,6 +210,12 @@ const (
 	EvProposalReceived    = "conversation.proposal.received"
 	EvThreadAttached      = "conversation.thread.attached"
 	EvThreadDetached      = "conversation.thread.detached"
+	EvTurnQueued          = "conversation.turn.queued"
+	EvTurnStarted         = "conversation.turn.started"
+	EvTurnStageChanged    = "conversation.turn.stage.changed"
+	EvTurnCompleted       = "conversation.turn.completed"
+	EvTurnFailed          = "conversation.turn.failed"
+	EvTurnInterrupted     = "conversation.turn.interrupted"
 )
 
 type proposalPayload struct {
@@ -227,7 +233,7 @@ type threadLinkPayload struct {
 
 const StreamType = "conversation"
 
-var ProjectionTables = []string{"conversations", "messages"}
+var ProjectionTables = []string{"conversations", "messages", "conversation_turn_runs"}
 
 // ResponseSchema — схема, к которой принуждается ответ модели.
 func ResponseSchema() json.RawMessage {

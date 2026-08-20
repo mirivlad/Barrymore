@@ -152,25 +152,19 @@ func (s *Service) Start(ctx context.Context, threadID, title string) (Conversati
 // loop, and records only the final Barrymore reply. Intermediate deliberation
 // drafts never become conversation history or actionable proposals.
 func (s *Service) Send(ctx context.Context, conversationID, text string) (Turn, error) {
-	if s.provider == nil {
-		return Turn{}, ErrNoProvider
-	}
-	if strings.TrimSpace(text) == "" {
-		return Turn{}, fmt.Errorf("пустая реплика")
-	}
-
-	conv, err := s.Get(ctx, conversationID)
+	run, err := s.BeginTurn(ctx, conversationID, text)
 	if err != nil {
 		return Turn{}, err
 	}
-	userMsg, err := s.record(ctx, conv, Message{
-		ConversationID: conv.ID, ThreadID: conv.ThreadID,
-		Role: RolePerson, Content: text,
-	}, event.Actor{Type: event.ActorPerson})
+	completed, err := s.ExecuteTurn(ctx, run.ID)
 	if err != nil {
 		return Turn{}, err
 	}
+	return completed.Result, nil
+}
 
+func (s *Service) executeRecordedTurn(ctx context.Context, conv Conversation, text string,
+	userMsg Message) (Turn, error) {
 	sections, trace, offered, err := s.buildContext(ctx, conv, text)
 	if err != nil {
 		return Turn{}, err
@@ -609,6 +603,12 @@ func (s *Service) Projections(reg *projection.Registry) {
 	reg.On(EvMessageRecorded, projectMessage)
 	reg.On(EvThreadAttached, projectThreadLink)
 	reg.On(EvThreadDetached, projectThreadLink)
+	reg.On(EvTurnQueued, projectTurnRun)
+	reg.On(EvTurnStarted, projectTurnRun)
+	reg.On(EvTurnStageChanged, projectTurnRun)
+	reg.On(EvTurnCompleted, projectTurnRun)
+	reg.On(EvTurnFailed, projectTurnRun)
+	reg.On(EvTurnInterrupted, projectTurnRun)
 	reg.OnAudit(EvProposalReceived)
 	if s.experience != nil {
 		s.experience.Projections(reg)

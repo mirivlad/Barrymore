@@ -34,6 +34,7 @@ const (
 	Approval      = "apr"
 	Correlation   = "corr"
 	Message       = "msg"
+	TurnRun       = "trn"
 	SkillRun      = "act"
 )
 
