@@ -66,7 +66,7 @@ func (s *Server) ui() http.Handler {
 			// therefore installs its hydration guard before loadTalk can restore
 			// the previous turn and accidentally open the Desk on entry.
 			_, _ = w.Write([]byte(
-				"\nimport \"/surface.js\";\nimport \"/desk.js\";\nimport \"/proxy.js\";\n"))
+				"\nimport \"/surface.js\";\nimport \"/presence.js\";\nimport \"/desk.js\";\nimport \"/proxy.js\";\n"))
 			return
 		}
 
