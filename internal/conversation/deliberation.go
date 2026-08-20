@@ -68,7 +68,7 @@ func (s *Service) deliberate(ctx context.Context, conv Conversation, question st
 			if strings.TrimSpace(proposal.Reply) == "" {
 				return deliberationResult{}, fmt.Errorf("финальный ответ модели пуст")
 			}
-			episodeID, err := s.finishResearchEpisode(ctx, episode, question, proposal.Reply,
+			episodeID, err := s.finishTurnEpisode(ctx, conv, episode, question, proposal.Reply,
 				steps, successes, failures, aggregate.Model)
 			if err != nil {
 				return deliberationResult{}, err
@@ -82,9 +82,9 @@ func (s *Service) deliberate(ctx context.Context, conv Conversation, question st
 			return deliberationResult{}, fmt.Errorf("модель запросила исследование %q, но research runtime не настроен", capID)
 		}
 		if episode == nil {
-			initial, _ := json.Marshal(map[string]any{"question": question})
+			initial, _ := json.Marshal(map[string]any{"question": question, "kind": "research"})
 			ep, err := s.experience.Begin(ctx, experience.StartRequest{
-				Goal: question, ThreadID: conv.ThreadID, ConversationID: conv.ID,
+				Goal: question, Scope: "conversation_turn", ThreadID: conv.ThreadID, ConversationID: conv.ID,
 				InitialContext: initial,
 			}, event.Actor{Type: event.ActorBarrymore})
 			if err != nil {
@@ -202,11 +202,29 @@ func (s *Service) recordResearchFailure(ctx context.Context, episodeID, capabili
 	return err
 }
 
-func (s *Service) finishResearchEpisode(ctx context.Context, ep *experience.Episode, question, answer string,
-	steps []experience.Step, successes, failures int, modelName string) (string, error) {
-	if ep == nil {
+// finishTurnEpisode makes Episode the durable unit of every successful final
+// answer, not only turns that happened to need a tool. With no objective
+// observations outcome stays unknown; explicit owner feedback is a separate
+// signal and never upgrades an unverified answer into technical truth.
+func (s *Service) finishTurnEpisode(ctx context.Context, conv Conversation, ep *experience.Episode,
+	question, answer string, steps []experience.Step, successes, failures int,
+	modelName string) (string, error) {
+
+	if s.experience == nil {
 		return "", nil
 	}
+	if ep == nil {
+		initial, _ := json.Marshal(map[string]any{"question": question, "kind": "direct_answer"})
+		created, err := s.experience.Begin(ctx, experience.StartRequest{
+			Goal: question, Scope: "conversation_turn", ThreadID: conv.ThreadID,
+			ConversationID: conv.ID, InitialContext: initial,
+		}, event.Actor{Type: event.ActorBarrymore})
+		if err != nil {
+			return "", fmt.Errorf("начало эпизода ответа: %w", err)
+		}
+		ep = &created
+	}
+
 	outcome := experience.OutcomeUnknown
 	switch {
 	case successes > 0 && failures == 0:
@@ -223,7 +241,7 @@ func (s *Service) finishResearchEpisode(ctx context.Context, ep *experience.Epis
 	if _, err := s.experience.Complete(ctx, ep.ID, experience.CompleteRequest{
 		Outcome: outcome, Result: answer, Verification: verification,
 	}, event.Actor{Type: event.ActorBarrymore}); err != nil {
-		return "", fmt.Errorf("завершение исследовательского эпизода: %w", err)
+		return "", fmt.Errorf("завершение эпизода ответа: %w", err)
 	}
 
 	// A clean successful route becomes procedural memory. Re-running a route is
