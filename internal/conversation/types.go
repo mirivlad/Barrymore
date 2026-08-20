@@ -46,9 +46,14 @@ type Message struct {
 
 // Proposal — то, что модель вернула сверх текста ответа.
 //
-// Это предложения, а не изменения состояния.
+// Это предложения, а не изменения состояния. Единственное исключение по
+// времени — Research: он исполняется runtime до показа финального ответа и
+// только через зарегистрированную read-only capability.
 type Proposal struct {
 	Reply string `json:"reply"`
+	// Research — какое наблюдение нужно сделать, прежде чем отвечать. Пустой
+	// CapabilityID означает, что имеющихся данных достаточно.
+	Research ResearchProposal `json:"research"`
 	// ThreadMatch — к какой нити относится разговор.
 	ThreadMatch *ThreadMatch `json:"thread_match,omitempty"`
 	// ThreadState — каноническое состояние нити после этого хода.
@@ -57,9 +62,22 @@ type Proposal struct {
 	ThreadPosition   *PositionProposal   `json:"thread_position,omitempty"`
 	MemoryCandidates []MemoryProposal    `json:"memory_candidates"`
 	WorkOrders       []WorkOrderProposal `json:"work_order_proposals"`
-	// OwnActions — то, что Бэрримор берётся сделать сам.
+	// OwnActions — то, что Бэрримор берётся сделать сам после ответа/с ведома
+	// владельца. Research сюда не относится: исследование закрывает пробел в
+	// знаниях до финального ответа.
 	OwnActions    []OwnActionProposal `json:"own_actions"`
 	OpenQuestions []string            `json:"open_questions"`
+}
+
+// ResearchProposal — один следующий шаг исследования.
+//
+// Модель выбирает только capability из показанного runtime каталога. Args —
+// данные для её типизированного контракта, а не команда, shell или URL,
+// исполняемый напрямую из текста модели.
+type ResearchProposal struct {
+	CapabilityID string          `json:"capability_id"`
+	Args         json.RawMessage `json:"args"`
+	Why          string          `json:"why"`
 }
 
 // OwnActionProposal — предложение применить собственное умение.
@@ -85,9 +103,8 @@ type ThreadMatch struct {
 	Why            string `json:"why"`
 }
 
-// StateProposal — предложенное каноническое состояние нити.
-//
-// Не пересказ разговора: то, что Бэрримор утверждает о нити и за что отвечает.
+// StateProposal — предложенное каноническое состояние нити после финального
+// ответа. Промежуточные исследовательские предложения не применяются.
 type StateProposal struct {
 	Goal      string   `json:"goal"`
 	Situation string   `json:"situation"`
@@ -110,9 +127,6 @@ type PositionProposal struct {
 }
 
 // MemoryProposal — предложение запомнить.
-//
-// Чувствительность и уверенность определяет сам Бэрримор: от них зависит,
-// запишет ли он сведение сам или вынесет на решение владельца.
 type MemoryProposal struct {
 	Type        string  `json:"type"`
 	Content     string  `json:"content"`
@@ -122,23 +136,13 @@ type MemoryProposal struct {
 }
 
 // WorkOrderProposal — предложение поручить работу исполнителю.
-//
-// Это только предложение: поручение создаётся отдельным действием владельца,
-// проходит выбор исполнителя, политику стоимости и подтверждение.
-//
-// Заполнено оно целиком — заголовок, цель, причина, каталог, критерии приёмки.
-// Половина полей означала бы, что вторую половину придётся печатать заново,
-// а именно этого владелец и не должен делать.
 type WorkOrderProposal struct {
 	Title              string   `json:"title"`
 	Goal               string   `json:"goal"`
 	Why                string   `json:"why"`
 	WorkspaceHint      string   `json:"workspace_hint,omitempty"`
 	AcceptanceCriteria []string `json:"acceptance_criteria,omitempty"`
-	// NeedsWrite — нужна ли исполнителю правка файлов. Это предложение, а не
-	// разрешение: запись включается подтверждением владельца, и в подтверждении
-	// она названа прямо.
-	NeedsWrite bool `json:"needs_write,omitempty"`
+	NeedsWrite         bool     `json:"needs_write,omitempty"`
 }
 
 // Turn — итог одного хода разговора.
@@ -147,44 +151,30 @@ type Turn struct {
 	Reply            Message             `json:"reply"`
 	Proposal         Proposal            `json:"proposal"`
 	MemoryCandidates []MemoryCandidateID `json:"memory_candidates"`
-	// Thread сообщает, что стало с нитью разговора на этом ходу.
-	Thread ThreadOutcome `json:"thread"`
-	// OwnActions — умения, которые Бэрримор готов применить прямо сейчас.
+	// EpisodeID заполнен, если перед финальным ответом был исследовательский
+	// эпизод. Он нужен для аудита и явной оценки владельца.
+	EpisodeID string `json:"episode_id,omitempty"`
+	Thread    ThreadOutcome `json:"thread"`
 	OwnActions []OwnAction `json:"own_actions,omitempty"`
 }
 
 // OwnAction — проверенное предложение применить умение.
-//
-// Проверенное значит: умение существует и применимо, а каталог назван.
-// Придуманное умение сюда не попадает — вместо него владелец видит отказ
-// с объяснением, как и в случае с выдуманной нитью.
 type OwnAction struct {
 	SkillID  string `json:"skill_id"`
 	Title    string `json:"title"`
 	Question string `json:"question"`
 	Target   string `json:"target,omitempty"`
 	Why      string `json:"why,omitempty"`
-	// Refused объясняет, почему предложение не принято.
-	Refused string `json:"refused,omitempty"`
+	Refused  string `json:"refused,omitempty"`
 }
 
 // ThreadOutcome — судьба нити после хода.
-//
-// Разделение намеренное: связать разговор с уже существующей нитью Бэрримор
-// может сам — это обратимо и ничего не создаёт. Завести новую нить он только
-// предлагает: сущности, появляющиеся без ведома владельца, засоряют систему
-// быстрее, чем приносят пользу.
 type ThreadOutcome struct {
-	// ThreadID — нить разговора после хода, если она есть.
 	ThreadID string `json:"thread_id,omitempty"`
 	Title    string `json:"title,omitempty"`
-	// Attached сообщает, что Бэрримор связал разговор с нитью на этом ходу.
-	Attached bool `json:"attached,omitempty"`
-	// Why объясняет выбор — и связывание, и предложение.
-	Why string `json:"why,omitempty"`
-	// Proposed заполнен, когда подходящей нити не нашлось.
+	Attached bool   `json:"attached,omitempty"`
+	Why      string `json:"why,omitempty"`
 	Proposed *NewThreadProposal `json:"proposed,omitempty"`
-	// Refused объясняет, почему предложение модели не применено.
 	Refused string `json:"refused,omitempty"`
 }
 
@@ -201,12 +191,9 @@ type MemoryCandidateID struct {
 	ID      string `json:"id"`
 	Type    string `json:"type"`
 	Content string `json:"content"`
-	// Auto сообщает, записал ли Бэрримор это сам.
-	Auto bool `json:"auto"`
-	// Reason объясняет решение.
-	Reason string `json:"reason"`
-	// ItemID заполнен, если запись уже сделана.
-	ItemID string `json:"item_id,omitempty"`
+	Auto    bool   `json:"auto"`
+	Reason  string `json:"reason"`
+	ItemID  string `json:"item_id,omitempty"`
 }
 
 // Типы событий разговора.
@@ -214,22 +201,15 @@ const (
 	EvConversationStarted = "conversation.started"
 	EvMessageRecorded     = "conversation.message.recorded"
 	EvProposalReceived    = "conversation.proposal.received"
-	// EvThreadAttached — разговор отнесён к нити.
-	EvThreadAttached = "conversation.thread.attached"
-	// EvThreadDetached — связь с нитью снята.
-	EvThreadDetached = "conversation.thread.detached"
+	EvThreadAttached      = "conversation.thread.attached"
+	EvThreadDetached      = "conversation.thread.detached"
 )
 
-// proposalPayload — запись о том, что Бэрримор предложил в этом ходу.
-//
-// Она и есть источник правды для последующих действий владельца: поручение
-// оформляется из неё, а не из того, что прислал браузер.
 type proposalPayload struct {
 	MessageID string   `json:"message_id"`
 	Proposal  Proposal `json:"proposal"`
 }
 
-// threadLinkPayload — событие о связи разговора с нитью.
 type threadLinkPayload struct {
 	ConversationID string    `json:"conversation_id"`
 	ThreadID       string    `json:"thread_id,omitempty"`
@@ -238,46 +218,50 @@ type threadLinkPayload struct {
 	At             time.Time `json:"at"`
 }
 
-// StreamType — тип потока событий разговора.
 const StreamType = "conversation"
 
-// ProjectionTables — таблицы проекций разговора.
 var ProjectionTables = []string{"conversations", "messages"}
 
 // ResponseSchema — схема, к которой принуждается ответ модели.
-//
-// ADR 0012: у llama-server это работает на уровне сэмплера, поэтому
-// разбор не встречает мусора, а невалидный ответ не может частично
-// изменить состояние.
 func ResponseSchema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "additionalProperties": false,
-  "required": ["reply", "thread_match", "thread_state", "memory_candidates",
+  "required": ["reply", "research", "thread_match", "thread_state", "memory_candidates",
                "own_actions", "work_order_proposals", "open_questions"],
   "properties": {
     "reply": {
       "type": "string",
-      "description": "Ответ Бэрримора владельцу на русском языке."
+      "description": "Финальный ответ владельцу. Если research.capability_id не пуст, это промежуточный черновик и он владельцу не показывается; допустима пустая строка."
+    },
+    "research": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability_id", "args", "why"],
+      "properties": {
+        "capability_id": {
+          "type": "string",
+          "description": "Следующая read-only capability из раздела исследовательских возможностей. Пустая строка означает: достаточно данных, можно дать финальный ответ."
+        },
+        "args": {
+          "type": "object",
+          "description": "Аргументы типизированной capability. Для capability без аргументов — пустой объект."
+        },
+        "why": {"type": "string", "description": "Какой пробел в знаниях закроет это наблюдение."}
+      }
     },
     "thread_match": {
       "type": "object",
       "additionalProperties": false,
       "required": ["thread_id", "new_thread_title", "new_thread_kind", "why"],
       "properties": {
-        "thread_id": {
-          "type": "string",
-          "description": "Идентификатор нити из раздела «Нити, которые уже есть», если разговор о ней. Иначе пустая строка. Придумывать идентификатор нельзя."
-        },
-        "new_thread_title": {
-          "type": "string",
-          "description": "Короткое название новой нити, если разговор не относится ни к одной из существующих. Иначе пустая строка."
-        },
+        "thread_id": {"type": "string"},
+        "new_thread_title": {"type": "string"},
         "new_thread_kind": {
           "type": "string",
           "enum": ["", "project", "idea", "problem", "decision", "conversation", "research", "waiting", "personal"]
         },
-        "why": {"type": "string", "description": "Почему именно эта нить."}
+        "why": {"type": "string"}
       }
     },
     "thread_state": {
@@ -285,9 +269,9 @@ func ResponseSchema() json.RawMessage {
       "additionalProperties": false,
       "required": ["goal", "situation", "next_step", "obstacles", "waiting"],
       "properties": {
-        "goal": {"type": "string", "description": "Чего мы хотим добиться в этой нити."},
-        "situation": {"type": "string", "description": "Где остановились прямо сейчас."},
-        "next_step": {"type": "string", "description": "Какой шаг следующий."},
+        "goal": {"type": "string"},
+        "situation": {"type": "string"},
+        "next_step": {"type": "string"},
         "obstacles": {"type": "array", "items": {"type": "string"}},
         "waiting": {"type": "array", "items": {"type": "string"}}
       }
@@ -319,15 +303,15 @@ func ResponseSchema() json.RawMessage {
     },
     "own_actions": {
       "type": "array",
-      "description": "Что ты можешь посмотреть сам, не зовя исполнителя. Если умение отвечает на вопрос владельца — оно здесь, а work_order_proposals остаётся пустым.",
+      "description": "Действия/умения после финального ответа. Не используй их вместо research для получения недостающего read-only evidence.",
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["skill_id", "target", "why"],
         "properties": {
-          "skill_id": {"type": "string", "description": "Идентификатор умения из раздела «Что ты умеешь сам». Придумывать нельзя."},
-          "target": {"type": "string", "description": "Абсолютный путь к каталогу, если умение его требует. Иначе пустая строка."},
-          "why": {"type": "string", "description": "Почему это стоит посмотреть сейчас."}
+          "skill_id": {"type": "string"},
+          "target": {"type": "string"},
+          "why": {"type": "string"}
         }
       }
     },
@@ -338,16 +322,12 @@ func ResponseSchema() json.RawMessage {
         "additionalProperties": false,
         "required": ["title", "goal", "why", "workspace_hint", "acceptance_criteria", "needs_write"],
         "properties": {
-          "title": {"type": "string", "description": "Короткий заголовок поручения."},
-          "goal": {"type": "string", "description": "Что именно должен сделать исполнитель."},
-          "why": {"type": "string", "description": "Почему это нужно сейчас."},
-          "workspace_hint": {"type": "string", "description": "Абсолютный путь к каталогу работы, если он известен из разговора или памяти."},
-          "acceptance_criteria": {
-            "type": "array",
-            "items": {"type": "string"},
-            "description": "По каким признакам будет видно, что работа сделана."
-          },
-          "needs_write": {"type": "boolean", "description": "Нужно ли исполнителю менять файлы. Если достаточно прочитать — false."}
+          "title": {"type": "string"},
+          "goal": {"type": "string"},
+          "why": {"type": "string"},
+          "workspace_hint": {"type": "string"},
+          "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+          "needs_write": {"type": "boolean"}
         }
       }
     },
