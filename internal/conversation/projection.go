@@ -57,15 +57,44 @@ func projectThreadLink(ctx context.Context, tx *sql.Tx, env event.Envelope) erro
 	return applyThreadLink(ctx, tx, p)
 }
 
+// deriveEpisodeID correlates a Barrymore reply with the completed Episode that
+// immediately produced it. The message event itself need not know the ID:
+// projections replay Episode completion before the final reply in the same
+// order as the live turn. Matching result + conversation avoids attaching an
+// unrelated episode; ordering disambiguates repeated identical answers.
+func deriveEpisodeID(ctx context.Context, tx *sql.Tx, m Message) (string, error) {
+	if m.EpisodeID != "" || m.Role != RoleBarrymore {
+		return m.EpisodeID, nil
+	}
+	var id string
+	err := tx.QueryRowContext(ctx, `
+		SELECT id FROM episodes
+		 WHERE conversation_id = ? AND status = 'completed' AND result = ?
+		   AND finished_at <= ?
+		 ORDER BY finished_at DESC, id DESC LIMIT 1`,
+		m.ConversationID, m.Content, ts(m.CreatedAt)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("поиск episode для сообщения %s: %w", m.ID, err)
+	}
+	return id, nil
+}
+
 func applyMessage(ctx context.Context, tx *sql.Tx, m Message) error {
 	trace, _ := json.Marshal(orEmpty(m.RetrievalTrace))
-	_, err := tx.ExecContext(ctx, `
+	episodeID, err := deriveEpisodeID(ctx, tx, m)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO messages (id, conversation_id, thread_id, role, content, provider, model,
 		                      prompt_tokens, output_tokens, latency_ms, episode_id, retrieval_trace, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (id) DO NOTHING`,
 		m.ID, m.ConversationID, nullable(m.ThreadID), m.Role, m.Content, m.Provider, m.Model,
-		m.PromptTokens, m.OutputTokens, m.LatencyMS, m.EpisodeID, string(trace), ts(m.CreatedAt))
+		m.PromptTokens, m.OutputTokens, m.LatencyMS, episodeID, string(trace), ts(m.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("проекция сообщения %s: %w", m.ID, err)
 	}
