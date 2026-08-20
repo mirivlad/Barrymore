@@ -167,6 +167,9 @@ func RegisterProviderInspector(r *Registry, provider model.Provider, clk clock.C
 	if provider == nil {
 		return nil
 	}
+	if clk == nil {
+		clk = clock.Real{}
+	}
 	return r.Register(Capability{
 		ID:          "runtime.provider.inspect",
 		Title:       "Проверить разговорную модель",
@@ -175,10 +178,7 @@ func RegisterProviderInspector(r *Registry, provider model.Provider, clk clock.C
 		Stability:   StabilityRealtime,
 	}, func(ctx context.Context, _ json.RawMessage) (Result, error) {
 		st := provider.Probe(ctx)
-		now := time.Now().UTC()
-		if clk != nil {
-			now = clk.Now()
-		}
+		now := clk.Now()
 		data, err := json.Marshal(map[string]any{
 			"provider": provider.Describe(),
 			"status": st.Status,
