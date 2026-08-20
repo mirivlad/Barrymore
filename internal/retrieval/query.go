@@ -73,10 +73,7 @@ func FTS(text string, limit int) string {
 	for _, term := range terms {
 		r := []rune(term)
 		prefix := r
-		switch {
-		case len(r) >= 7:
-			prefix = r[:len(r)-2]
-		case len(r) >= 5:
+		if len(r) >= 5 {
 			prefix = r[:len(r)-1]
 		}
 		parts = append(parts, `"`+strings.ReplaceAll(string(prefix), `"`, `""`)+`"*`)
