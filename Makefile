@@ -13,6 +13,19 @@ ADDR ?= 127.0.0.1:7717
 # вместо прежней 35B MoE-модели, чтобы постоянно живущий дворецкий не требовал
 # тяжёлого resident inference для обычного разговора и диспетчеризации.
 LOCAL_MODEL ?= $(CURDIR)/data/local_models/Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf
+
+# Для воспроизводимого live-run путь выбирает Makefile и передаёт его явно.
+# Иначе `-llama-server=` подавляет сохранённый bootstrap-путь, а Resolve при
+# пустом значении ищет меньший набор мест, чем первый запуск Barrymore.
+# Порядок совпадает с bootstrap: vendored build, ~/.local/bin, ~/llama.cpp,
+# затем PATH.
+LLAMA_SERVER ?= $(or \
+	$(firstword $(wildcard \
+		$(CURDIR)/third_party/llama.cpp/build/bin/llama-server \
+		$(HOME)/.local/bin/llama-server \
+		$(HOME)/llama.cpp/build/bin/llama-server)), \
+	$(shell command -v llama-server 2>/dev/null))
+
 # Первый bring-up на 8 ГБ VRAM намеренно начинается с 8K контекста: сначала
 # проверяем поведение и скорость, затем поднимаем окно по фактической памяти.
 # История Barrymore хранится runtime'ом, а не обязана целиком жить в KV-cache.
@@ -20,7 +33,7 @@ LOCAL_MODEL ?= $(CURDIR)/data/local_models/Ornith-1.5-9B-AD-Q5_K-Q4_K.gguf
 # не должен незаметно вернуть cpu_moe или внешний provider в тест Ornith.
 MODEL_FLAGS ?= -local-model-context 8192 -local-model-threads 14 \
 	-local-model-gpu-layers 99 -local-model-cpu-moe 0 -local-model-port 18080 \
-	-llama-server= -provider= -provider-model=local -provider-label=Ornith
+	-llama-server="$(LLAMA_SERVER)" -provider= -provider-model=local -provider-label=Ornith
 
 .PHONY: help build test test-race vet fmt lint run run-quiet dev install uninstall \
         clean host-audit rebuild ci e2e ornith-ready
@@ -62,21 +75,19 @@ ornith-ready: ## Проверить окружение первого живог
 		exit 1; \
 	}
 	@printf "модель: "; ls -lh "$(LOCAL_MODEL)" | awk '{print $$5, $$9}'
-	@printf "llama-server: "; \
-		if test -x third_party/llama.cpp/build/bin/llama-server; then \
-			echo third_party/llama.cpp/build/bin/llama-server; \
-		elif command -v llama-server >/dev/null 2>&1; then \
-			command -v llama-server; \
-		else \
-			echo "не найден (Barrymore также проверит ~/.local/bin и ~/llama.cpp/build/bin)"; \
-		fi
+	@test -n "$(LLAMA_SERVER)" || { \
+		echo "llama-server не найден ни в third_party, ни в ~/.local/bin, ни в ~/llama.cpp/build/bin, ни в PATH"; \
+		exit 1; \
+	}
+	@test -x "$(LLAMA_SERVER)" || { echo "llama-server не исполняемый: $(LLAMA_SERVER)"; exit 1; }
+	@echo "llama-server: $(LLAMA_SERVER)"
 	@printf "bubblewrap: "; command -v bwrap 2>/dev/null || echo "не найден — сам Barrymore работает, proxy-only персонал запускаться не будет"
 
 run: build ornith-ready ## Запустить Бэрримора вместе с локальной Ornith
 	$(BIN) -addr $(ADDR) -data-root $(DATA_ROOT) -workspace-roots $(WORKSPACE_ROOTS) \
 		-local-model $(LOCAL_MODEL) $(MODEL_FLAGS)
 
-run-quiet: build ## Запустить без локальной модели: только нити, штат и поручения
+run-quiet: build ## Запустить без локальной модели: runtime и интерфейс без разговора
 	$(BIN) -addr $(ADDR) -data-root $(DATA_ROOT) -workspace-roots $(WORKSPACE_ROOTS)
 
 dev: run ## Псевдоним run
