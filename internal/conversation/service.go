@@ -205,7 +205,7 @@ func (s *Service) Send(ctx context.Context, conversationID, text string) (Turn, 
 		return Turn{}, err
 	}
 
-	sections, trace, offered, err := s.buildContext(ctx, conv)
+	sections, trace, offered, err := s.buildContext(ctx, conv, text)
 	if err != nil {
 		return Turn{}, err
 	}
@@ -497,12 +497,19 @@ func (s *Service) ProposalFor(ctx context.Context, conversationID, messageID str
 // Возвращаемый список нитей — не украшение ответа, а граница полномочий:
 // связать разговор можно только с тем, что было показано. Сослаться на нить,
 // которой не предлагали, значит сослаться на догадку.
-func (s *Service) buildContext(ctx context.Context, conv Conversation) (
+func (s *Service) buildContext(ctx context.Context, conv Conversation, question string) (
 	[]ContextSection, []string, map[string]string, error) {
 
 	var sections []ContextSection
 	var trace []string
 	offered := map[string]string{}
+
+	recalledSections, recalledTrace, err := s.recallContext(ctx, question)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	sections = append(sections, recalledSections...)
+	trace = append(trace, recalledTrace...)
 
 	if conv.ThreadID != "" {
 		d, err := s.threads.Detail(ctx, conv.ThreadID)
@@ -636,21 +643,6 @@ func (s *Service) buildContext(ctx context.Context, conv Conversation) (
 			})
 			trace = append(trace, fmt.Sprintf("опыт по способам работы: %d записей", len(ps)))
 		}
-	}
-
-	items, err := s.memory.Active(ctx, 40)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if len(items) > 0 {
-		var b strings.Builder
-		for _, it := range items {
-			b.WriteString("- [" + it.Type + "] " + it.Content + "\n")
-		}
-		sections = append(sections, ContextSection{Title: "Подтверждённая память", Body: b.String()})
-		trace = append(trace, fmt.Sprintf("подтверждённая память: %d записей", len(items)))
-	} else {
-		trace = append(trace, "подтверждённой памяти пока нет")
 	}
 
 	if s.rt != nil {
