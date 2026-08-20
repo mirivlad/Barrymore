@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/mirivlad/barrymore/internal/experience"
-	"github.com/mirivlad/barrymore/internal/memory"
 )
 
 // recallContext retrieves experience for this question before deliberation.
@@ -102,7 +101,3 @@ func feedbackCounts(items []experience.Feedback) (likes, dislikes int) {
 	}
 	return likes, dislikes
 }
-
-// Keep the memory import explicit: recallContext is the boundary that combines
-// factual memory and episodic/procedural experience.
-var _ memory.RecallItem
